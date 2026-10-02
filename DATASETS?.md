@@ -25,7 +25,9 @@ Not raw patient-level data matrices but statistical insights:
 * Platforms affiliated with the [International Society of Arthroplasty Registries (ISAR)](https://actaorthop.org/actao/article/view/42706) frequently share open-access, standardized annual reports mapping data quality, revision rates, and methodology summaries across global knee and joint tracking initiatives. [11] 
 
 ## 4. Sarcoma Subtype / Radiographic Morphology:
-Radiogenomic signature discovery for sarcoma subtypes — Correlate radiomic features (texture, shape, intensity heterogeneity) extracted from CT/MR with specific mutations/CNV/expression clusters (e.g., MDM2 amplification in liposarcoma, TP53 status in leiomyosarcoma).
+* Radiogenomic signature discovery for sarcoma subtypes — Correlate radiomic features (texture, shape, intensity heterogeneity) extracted from CT/MR with specific mutations/CNV/expression clusters (e.g., MDM2 amplification in liposarcoma, TP53 status in leiomyosarcoma). 
+* TCGA-SARC (via TCIA)
+* GDC project page (to cross-reference genomic data per case ID): portal.gdc.cancer.gov/projects/TCGA-SARC
 
 [1] [https://aimi.stanford.edu](https://aimi.stanford.edu/datasets/mrnet-knee-mris)
 [2] [https://zenodo.org](https://zenodo.org/records/14789903)
