@@ -31,9 +31,7 @@ Not raw patient-level data matrices but statistical insights:
 
 * Proof-of-concept / feasibility pipeline study — Frame it as "we built and demonstrated an end-to-end radiogenomic pipeline (segmentation → radiomics extraction → genomic correlation) on available cases," not as a validated predictive model. This is legitimate and publishable as a methods/feasibility paper, explicitly scoped as hypothesis-generating.
 
-Descriptive/qualitative case-series correlation — Report observed associations between specific radiomic features and specific genomic alterations per case, without claiming generalizable predictive power. Useful for generating hypotheses to test in a larger cohort later.
-
-Combine cohorts to get real n — As discussed, merge TCGA-SARC with other TCIA sarcoma collections (Soft-tissue-Sarcoma, WORC, etc.) to reach a workable sample size (ideally 50+ for any defensible ML, ~100+ better). This is the actual path to a viable pilot classifier study — not using TCGA-SARC alone.
+* Combine cohorts to get real n — As discussed, merge TCGA-SARC with other TCIA sarcoma collections (Soft-tissue-Sarcoma, WORC, etc.) to reach a workable sample size (ideally 50+ for any defensible ML, ~100+ better). This is the actual path to a viable pilot classifier study — not using TCGA-SARC alone.
 
 [1] [https://aimi.stanford.edu](https://aimi.stanford.edu/datasets/mrnet-knee-mris)
 [2] [https://zenodo.org](https://zenodo.org/records/14789903)
