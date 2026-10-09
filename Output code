@@ -314,4 +314,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-#Corresponsing participant/sample description output
+#Corresponsing participant/sample description output in TCGA-SARC-cohort-summary csv file
