@@ -1,0 +1,317 @@
+#python code
+#Each input row represents an imaging series. Participants and studies are counted by distinct identifiers. Repeated identical series are counted once; conflicting records for the same series stop processing rather than inflate counts. All original input rows are retained on the Source metadata sheet. No scans or genomic data are downloaded. Rerun after changing the source file.
+"""
+
+import argparse
+import os
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+try:
+    from openpyxl import Workbook, load_workbook
+except ModuleNotFoundError:
+    # Use the existing Codex Python runtime if Terminal's Python lacks openpyxl.
+    bundled_python = Path.home() / ".cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3"
+    if bundled_python.exists() and Path(sys.executable).resolve() != bundled_python.resolve():
+        os.execv(str(bundled_python), [str(bundled_python), str(Path(__file__).resolve()), *sys.argv[1:]])
+    sys.exit("This script needs openpyxl. Install it with: python3 -m pip install openpyxl")
+from openpyxl.chart import BarChart, Reference
+from openpyxl.chart.label import DataLabelList
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+from openpyxl.workbook.properties import CalcProperties
+
+
+NAVY = "243B53"
+BLUE = "426B9B"
+REQUIRED = (
+    "Patient ID", "Patient Sex", "Study Instance UID", "Series Instance UID",
+    "Modality", "Image Count",
+)
+
+
+def text(value):
+    return "" if value is None else str(value).strip()
+
+
+def load_metadata(path, sheet_name):
+    book = load_workbook(path, read_only=True, data_only=True)
+    try:
+        if sheet_name not in book.sheetnames:
+            raise ValueError(f"Sheet {sheet_name!r} not found. Available: {book.sheetnames}")
+        iterator = book[sheet_name].iter_rows(values_only=True)
+        headers = next(iterator, None)
+        if not headers:
+            raise ValueError("The source sheet is empty.")
+        names = [text(v) for v in headers]
+        if len(names) != len(set(names)) or any(not n for n in names):
+            raise ValueError("Column headers must be nonblank and unique.")
+        missing = set(REQUIRED) - set(names)
+        if missing:
+            raise ValueError(f"Missing required columns: {', '.join(sorted(missing))}")
+        raw_rows, series = [], {}
+        for excel_row, values in enumerate(iterator, start=2):
+            if all(v is None for v in values):
+                continue
+            raw_rows.append(list(values))
+            record = dict(zip(names, values))
+            for key in REQUIRED[:-1]:
+                record[key] = text(record[key])
+            for key in ("Patient ID", "Study Instance UID", "Series Instance UID"):
+                if not record[key]:
+                    raise ValueError(f"Row {excel_row}: missing {key}.")
+            record["Modality"] = record["Modality"].upper() or "Unknown"
+            record["Patient Sex"] = record["Patient Sex"].upper() or "Unknown"
+            value = record["Image Count"]
+            try:
+                count = int(value)
+                valid = not isinstance(value, bool) and float(value) == count and count >= 0
+            except (TypeError, ValueError, OverflowError):
+                valid = False
+            if not valid:
+                raise ValueError(f"Row {excel_row}: Image Count must be a nonnegative integer.")
+            record["Image Count"] = count
+            uid = record["Series Instance UID"]
+            if uid in series and series[uid] != record:
+                raise ValueError(f"Row {excel_row}: conflicting records for series {uid}.")
+            series[uid] = record
+        if not series:
+            raise ValueError("No imaging records were found.")
+        return list(headers), raw_rows, list(series.values())
+    finally:
+        book.close()
+
+
+def summarize(records):
+    grouped = defaultdict(list)
+    study_owner = {}
+    for record in records:
+        pid, study = record["Patient ID"], record["Study Instance UID"]
+        if study in study_owner and study_owner[study] != pid:
+            raise ValueError(f"Study UID {study} is assigned to multiple participants.")
+        study_owner[study] = pid
+        grouped[pid].append(record)
+    participants = []
+    for pid, rows in sorted(grouped.items()):
+        sexes = {r["Patient Sex"] for r in rows} - {"Unknown"}
+        if len(sexes) > 1:
+            raise ValueError(f"Conflicting recorded sex values for {pid}: {sexes}")
+        modalities = {r["Modality"] for r in rows}
+        group = {
+            frozenset({"CT"}): "CT only",
+            frozenset({"MR"}): "MRI only",
+            frozenset({"CT", "MR"}): "CT and MRI",
+        }.get(frozenset(modalities), "Other/unknown")
+        participants.append([
+            pid, next(iter(sexes), "Unknown"),
+            sum(r["Modality"] == "CT" for r in rows),
+            sum(r["Modality"] == "MR" for r in rows),
+            len({r["Study Instance UID"] for r in rows}), len(rows),
+            sum(r["Image Count"] for r in rows), group,
+        ])
+    return participants
+
+
+def header(sheet, row, start, end):
+    for cells in sheet.iter_rows(min_row=row, max_row=row, min_col=start, max_col=end):
+        for cell in cells:
+            cell.fill = PatternFill("solid", fgColor=NAVY)
+            cell.font = Font(name="Arial", size=11, color="FFFFFF", bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    sheet.row_dimensions[row].height = 32
+
+
+def write_workbook(source, output, sheet_name="Metadata", title="TCGA-SARC imaging cohort"):
+    headers, raw_rows, records = load_metadata(source, sheet_name)
+    participants = summarize(records)
+    book = Workbook()
+    summary = book.active
+    summary.title = "Cohort summary"
+    raw = book.create_sheet("Source metadata")
+    book.calculation = CalcProperties(calcId=0, fullCalcOnLoad=True)
+    last = 19 + len(participants)
+    total_row = last + 1
+    note_row = total_row + 3
+    for row in summary.iter_rows(min_row=1, max_row=note_row + 8, max_col=16):
+        for cell in row:
+            cell.font = Font(name="Arial", size=11, color=NAVY)
+            cell.alignment = Alignment(vertical="center")
+    for row in range(1, note_row + 9):
+        summary.row_dimensions[row].height = 23
+    for col in range(1, 17):
+        summary.column_dimensions[get_column_letter(col)].width = 13
+    summary.column_dimensions["A"].width = 26
+    summary.column_dimensions["E"].width = 19
+    summary.column_dimensions["H"].width = 20
+    summary.column_dimensions["I"].width = 3
+    for sheet in (summary, raw):
+        sheet.sheet_view.showGridLines = False
+    summary["A2"] = title
+    summary["A2"].font = Font(name="Arial", size=17, bold=True, color=NAVY)
+    summary["A3"] = "Counts calculated from NBIA metadata. All unique listed series are included."
+
+    for row, values in enumerate([
+        ["Cohort inventory", "Count"],
+        ["Participants", f"=COUNTA(A20:A{last})"],
+        ["Studies", f"=SUM(E20:E{last})"],
+        ["Series", f"=SUM(F20:F{last})"],
+        ["Images", f"=SUM(G20:G{last})"],
+    ], start=5):
+        for col, value in enumerate(values, start=1):
+            summary.cell(row, col, value)
+    header(summary, 5, 1, 2)
+    for col, value in enumerate(["Imaging group", "Participants", "Share"], 1):
+        summary.cell(11, col, value)
+    groups = ["CT only", "MRI only", "CT and MRI"]
+    if any(p[7] == "Other/unknown" for p in participants):
+        groups.append("Other/unknown")
+    for row, group in enumerate(groups, 12):
+        summary.cell(row, 1, group)
+        summary.cell(row, 2, f'=COUNTIFS($H$20:$H${last},A{row})')
+        summary.cell(row, 3, f"=B{row}/$B$6").number_format = "0%"
+    group_last = 11 + len(groups)
+    summary.cell(group_last + 1, 1, "Total")
+    summary.cell(group_last + 1, 2, f"=SUM(B12:B{group_last})")
+    summary.cell(group_last + 1, 3, f"=SUM(C12:C{group_last})").number_format = "0%"
+    header(summary, 11, 1, 3)
+
+    for col, value in enumerate(["Recorded sex", "Participants", "Share"], 5):
+        summary.cell(11, col, value)
+    for row, label, criterion in [(12, "Male", "M"), (13, "Female", "F")]:
+        summary.cell(row, 5, label)
+        summary.cell(row, 6, f'=COUNTIFS($B$20:$B${last},"{criterion}")')
+    summary["E14"] = "Other/unknown"
+    summary["F14"] = "=$B$6-SUM(F12:F13)"
+    summary["E15"] = "Total"
+    summary["F15"] = "=SUM(F12:F14)"
+    for row in range(12, 16):
+        summary.cell(row, 7, f"=F{row}/$B$6").number_format = "0%"
+    header(summary, 11, 5, 7)
+
+    detail_headers = ["Participant ID", "Sex", "CT series", "MRI series", "Studies", "Series", "Images", "Imaging group"]
+    for col, value in enumerate(detail_headers, 1):
+        summary.cell(19, col, value)
+    header(summary, 19, 1, 8)
+    for row, participant in enumerate(participants, 20):
+        for col, value in enumerate(participant, 1):
+            summary.cell(row, col, value)
+        for col in range(3, 8):
+            summary.cell(row, col).number_format = "#,##0"
+    summary.cell(total_row, 1, "Total")
+    for col in range(3, 8):
+        letter = get_column_letter(col)
+        summary.cell(total_row, col, f"=SUM({letter}20:{letter}{last})").number_format = "#,##0"
+    for row in range(6, 10):
+        summary.cell(row, 2).number_format = "#,##0"
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.title = "Participants by imaging group"
+    chart.y_axis.title = "Participants"
+    chart.y_axis.scaling.min = 0
+    chart.y_axis.majorUnit = 1
+    chart.y_axis.numFmt = "0"
+    chart.legend = None
+    chart.add_data(Reference(summary, min_col=2, min_row=11, max_row=group_last), titles_from_data=True)
+    chart.set_categories(Reference(summary, min_col=1, min_row=12, max_row=group_last))
+    chart.series[0].graphicalProperties.solidFill = BLUE
+    chart.series[0].graphicalProperties.line.solidFill = BLUE
+    chart.dataLabels = DataLabelList()
+    chart.dataLabels.showVal = True
+    chart.width, chart.height = 18, 9
+    summary.add_chart(chart, "J5")
+
+    duplicate_count = len(raw_rows) - len(records)
+    notes = [
+        "Method and interpretation",
+        "Participants, studies and series are counted by distinct identifiers. Images are summed across unique series.",
+        "Images and series are repeated observations within participants, not independent participants.",
+        "Imaging groups are mutually exclusive. MR is displayed as MRI. Other/unknown includes any other modality set.",
+        "Participant details are calculated by Python. Excel summaries and the chart reference the participant table.",
+        f"Source rows: {len(raw_rows)}. Unique series: {len(records)}. Identical duplicate series rows excluded: {duplicate_count}.",
+        "Sarcoma subtype and genomic matching are not established by this imaging-only analysis.",
+        "Scouts/localizers and all other listed series are included. Radiomics suitability has not been assessed.",
+        "Rerun the script after changing source metadata. Source-sheet edits alone do not rebuild participant details.",
+    ]
+    for row, note in enumerate(notes, note_row):
+        summary.cell(row, 1, note)
+    summary.cell(note_row, 1).font = Font(name="Arial", size=11, bold=True, color=NAVY)
+
+    raw.append([f"Source: {source.name}, sheet {sheet_name}. Original input rows preserved below."])
+    raw.append([])
+    raw.append(headers)
+    for values in raw_rows:
+        # Preserve literal source text rather than interpreting it as a formula.
+        raw.append(values)
+        for cell in raw[raw.max_row]:
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                cell.data_type = "s"
+    for row in raw.iter_rows(min_row=1, max_row=raw.max_row):
+        for cell in row:
+            cell.font = Font(name="Arial", size=11, color=NAVY)
+    header(raw, 3, 1, len(headers))
+    raw.row_dimensions[3].height = 58
+    for col in range(1, len(headers) + 1):
+        raw.column_dimensions[get_column_letter(col)].width = 25
+    raw.freeze_panes = "B4"
+    raw.auto_filter.ref = f"A3:{get_column_letter(len(headers))}{raw.max_row}"
+    summary.sheet_properties.pageSetUpPr.fitToPage = True
+    summary.page_setup.orientation = "landscape"
+    summary.page_setup.paperSize = summary.PAPERSIZE_A3
+    summary.page_setup.fitToWidth = 1
+    summary.page_setup.fitToHeight = 0
+    summary.print_options.horizontalCentered = True
+    summary.print_area = f"A1:Q{note_row + len(notes) - 1}"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    book.save(output)
+
+    # Independently reconcile participant aggregation to unique source records.
+    assert sum(p[4] for p in participants) == len({r["Study Instance UID"] for r in records})
+    assert sum(p[5] for p in participants) == len(records)
+    assert sum(p[6] for p in participants) == sum(r["Image Count"] for r in records)
+    print(f"Saved: {output}")
+    print(f"Participants: {len(participants)} | Studies: {sum(p[4] for p in participants)} | "
+          f"Series: {len(records)} | Images: {sum(p[6] for p in participants):,}")
+    for group in groups:
+        count = sum(p[7] == group for p in participants)
+        print(f"{group}: {count} ({count / len(participants):.0%})")
+    print("Open in Excel to calculate formula cells and display the chart.")
+    return participants
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("input", nargs="?", type=Path,
+                        default=Path.home() / "Downloads/TCIA_TCGA-SARC_09-16-2015-nbia-digest.xlsx",
+                        help="NBIA metadata .xlsx file (defaults to your downloaded metadata)")
+    parser.add_argument("--output", type=Path, default=None,
+                        help="Destination .xlsx (default: Documents/BMEN 600)")
+    parser.add_argument("--sheet", default="Metadata", help="Input sheet name (default: Metadata)")
+    parser.add_argument("--title", default="BMEN 600: TCGA-SARC imaging cohort")
+    parser.add_argument("--overwrite", action="store_true", help="Allow replacing an existing output file")
+    args = parser.parse_args()
+    source = args.input.expanduser().resolve()
+    default_output = Path.home() / "Documents/BMEN 600/TCGA-SARC-cohort-summary.xlsx"
+    output = (args.output or default_output).expanduser().resolve()
+    if args.output is None and not args.overwrite:
+        suffix = 2
+        while output.exists():
+            output = default_output.with_name(f"{default_output.stem}-{suffix}.xlsx")
+            suffix += 1
+    if source == output:
+        parser.error("Input and output must be different files.")
+    if output.suffix.lower() != ".xlsx":
+        parser.error("Output must have an .xlsx extension.")
+    if output.exists() and not args.overwrite:
+        parser.error("Output already exists. Choose another filename or use --overwrite.")
+    try:
+        write_workbook(source, output, args.sheet, args.title)
+    except (ValueError, OSError) as error:
+        parser.exit(1, f"Error: {error}\n")
+
+
+if __name__ == "__main__":
+    main()
+
+#Corresponsing participant/sample description output
