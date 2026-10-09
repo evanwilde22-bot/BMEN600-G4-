@@ -26,7 +26,7 @@ Not raw patient-level data matrices but statistical insights:
 
 ## 4. Sarcoma Subtype / Radiographic Morphology:
 * Radiogenomic signature discovery for sarcoma subtypes — Correlate radiomic features (texture, shape, intensity heterogeneity) extracted from CT/MR with specific mutations/CNV/expression clusters (e.g., MDM2 amplification in liposarcoma, TP53 status in leiomyosarcoma). 
-* TCGA-SARC (via TCIA)
+* TCGA-SARC (via TCIA) https://www.cancerimagingarchive.net/collection/tcga-sarc/
 * GDC project page (to cross-reference genomic data per case ID): portal.gdc.cancer.gov/projects/TCGA-SARC
 
 * Proof-of-concept / feasibility pipeline study — Frame it as "we built and demonstrated an end-to-end radiogenomic pipeline (segmentation → radiomics extraction → genomic correlation) on available cases," not as a validated predictive model. This is legitimate and publishable as a methods/feasibility paper, explicitly scoped as hypothesis-generating.
