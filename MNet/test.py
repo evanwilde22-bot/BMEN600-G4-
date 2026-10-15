@@ -60,11 +60,11 @@ def test(data_loader, model, img_names, sets):
         # resize mask to original size
         [batchsize, _, mask_d, mask_h, mask_w] = probs.shape
         data = nib.load(os.path.join(sets.data_root, img_names[batch_id]))
-        data = data.get_data()
+        data = np.asanyarray(data.dataobj)
         [depth, height, width] = data.shape
         mask = probs[0]
         scale = [1, depth*1.0/mask_d, height*1.0/mask_h, width*1.0/mask_w]
-        mask = ndimage.interpolation.zoom(mask, scale, order=1)
+        mask = ndimage.zoom(mask, scale, order=1)
         mask = np.argmax(mask, axis=0)
         
         masks.append(mask)
@@ -97,7 +97,7 @@ if __name__ == '__main__':
     dices = np.zeros([Nimg, sets.n_seg_classes])
     for idx in range(Nimg):
         label = nib.load(os.path.join(sets.data_root, label_names[idx]))
-        label = label.get_data()
+        label = np.asanyarray(label.dataobj)
         dices[idx, :] = seg_eval(masks[idx], label, range(sets.n_seg_classes))
     
     # print result
