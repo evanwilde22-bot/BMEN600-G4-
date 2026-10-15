@@ -5,6 +5,15 @@ This reuses MNet's model/optimizer/training loop but swaps in
 SarcomaDataset (which remaps 255-valued masks to class label 1) instead of
 BrainS18Dataset. The original MNet/train.py is left untouched.
 
+NOTE on loss: sarcoma tumors occupy a tiny fraction of total image volume,
+so a plain unweighted CrossEntropyLoss can reach a very low value simply by
+predicting "background" everywhere -- training loss looking good is *not*
+evidence the model is actually segmenting tumors. To counter this severe
+class imbalance, the loss here combines:
+  1. CrossEntropyLoss with a higher weight on the foreground (tumor) class
+  2. Soft Dice loss, which directly optimizes voxel overlap and is
+     naturally robust to class imbalance (same idea used in nnU-Net, etc.)
+
 Run from the MNet directory so relative imports resolve, e.g.:
 
     cd MNet
@@ -23,6 +32,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch import optim
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 # allow running this script from either the MNet directory or scripts/
@@ -38,11 +48,32 @@ from model import generate_model
 from datasets.sarcoma import SarcomaDataset
 from utils.logger import log
 
+# weight given to the tumor (foreground) class relative to background in
+# CrossEntropyLoss. Tune this based on your actual tumor:background voxel
+# ratio -- larger values push the model harder towards predicting
+# foreground when uncertain. Background stays at weight 1.0.
+FOREGROUND_CE_WEIGHT = 20.0
+
+
+def dice_loss(logits, target, smooth=1e-5):
+    """
+    Soft Dice loss for the foreground (tumor) class. Operates directly on
+    predicted probabilities rather than hard argmax predictions, so it's
+    differentiable. Robust to class imbalance since it optimizes overlap
+    rather than per-voxel accuracy.
+    """
+    probs = F.softmax(logits, dim=1)[:, 1]  # foreground probability
+    target_fg = (target == 1).float()
+    intersection = (probs * target_fg).sum()
+    denom = probs.sum() + target_fg.sum()
+    return 1.0 - (2.0 * intersection + smooth) / (denom + smooth)
+
 
 def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval, save_folder, sets):
     batches_per_epoch = len(data_loader)
     log.info('{} epochs in total, {} batches per epoch'.format(total_epochs, batches_per_epoch))
-    loss_seg = nn.CrossEntropyLoss(ignore_index=-1)
+    class_weights = torch.tensor([1.0, FOREGROUND_CE_WEIGHT])
+    loss_seg = nn.CrossEntropyLoss(weight=class_weights, ignore_index=-1)
 
     print("Current setting is:")
     print(sets)
@@ -81,14 +112,16 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
                 new_label_masks = new_label_masks.cuda()
 
             loss_value_seg = loss_seg(out_masks, new_label_masks)
-            loss = loss_value_seg
+            loss_value_dice = dice_loss(out_masks, new_label_masks)
+            loss = loss_value_seg + loss_value_dice
             loss.backward()
             optimizer.step()
 
             avg_batch_time = (time.time() - train_time_sp) / (1 + batch_id_sp)
             log.info(
-                'Batch: {}-{} ({}), loss = {:.3f}, loss_seg = {:.3f}, avg_batch_time = {:.3f}'
-                .format(epoch, batch_id, batch_id_sp, loss.item(), loss_value_seg.item(), avg_batch_time))
+                'Batch: {}-{} ({}), loss = {:.3f}, loss_seg = {:.3f}, loss_dice = {:.3f}, avg_batch_time = {:.3f}'
+                .format(epoch, batch_id, batch_id_sp, loss.item(), loss_value_seg.item(),
+                        loss_value_dice.item(), avg_batch_time))
 
             if not sets.ci_test:
                 if batch_id == 0 and batch_id_sp != 0 and batch_id_sp % save_interval == 0:
