@@ -7,6 +7,16 @@ segmentation masks, since the STS RTSTRUCT-derived masks are stored with
 foreground voxels at 255 (not 1). Without this remap, CrossEntropyLoss
 would receive out-of-range class labels during training/evaluation.
 
+NOTE on cropping: training intentionally does NOT use a random tumor-centric
+crop (unlike the original brains18.py). Testing has no knowledge of where
+the tumor is, so it only trims empty background/air (__drop_invalid_range__)
+before resizing to the network input size. If training cropped tightly
+around the tumor, the tumor would occupy a much larger fraction of the
+resized volume at train time than at test time, teaching the model to
+recognize tumors at a scale it never sees during inference. To keep
+train/test preprocessing consistent, training uses the same
+drop-invalid-range + resize pipeline as testing.
+
 Expected file list format (train.txt / val.txt), one case per line:
     <relative image path> <relative mask path>
 
@@ -110,42 +120,6 @@ class SarcomaDataset(Dataset):
         else:
             return volume[min_z:max_z, min_h:max_h, min_w:max_w]
 
-    def __random_center_crop__(self, data, label):
-        from random import random
-        """
-        Random crop
-        """
-        target_indexs = np.where(label > 0)
-        [img_d, img_h, img_w] = data.shape
-        [max_D, max_H, max_W] = np.max(np.array(target_indexs), axis=1)
-        [min_D, min_H, min_W] = np.min(np.array(target_indexs), axis=1)
-        [target_depth, target_height, target_width] = np.array([max_D, max_H, max_W]) - np.array([min_D, min_H, min_W])
-        Z_min = int((min_D - target_depth * 1.0 / 2) * random())
-        Y_min = int((min_H - target_height * 1.0 / 2) * random())
-        X_min = int((min_W - target_width * 1.0 / 2) * random())
-
-        Z_max = int(img_d - ((img_d - (max_D + target_depth * 1.0 / 2)) * random()))
-        Y_max = int(img_h - ((img_h - (max_H + target_height * 1.0 / 2)) * random()))
-        X_max = int(img_w - ((img_w - (max_W + target_width * 1.0 / 2)) * random()))
-
-        Z_min = np.max([0, Z_min])
-        Y_min = np.max([0, Y_min])
-        X_min = np.max([0, X_min])
-
-        Z_max = np.min([img_d, Z_max])
-        Y_max = np.min([img_h, Y_max])
-        X_max = np.min([img_w, X_max])
-
-        Z_min = int(Z_min)
-        Y_min = int(Y_min)
-        X_min = int(X_min)
-
-        Z_max = int(Z_max)
-        Y_max = int(Y_max)
-        X_max = int(X_max)
-
-        return data[Z_min: Z_max, Y_min: Y_max, X_min: X_max], label[Z_min: Z_max, Y_min: Y_max, X_min: X_max]
-
     def __itensity_normalize_one_volume__(self, volume):
         """
         normalize the itensity of an nd volume based on the mean and std of nonzeor region
@@ -173,15 +147,6 @@ class SarcomaDataset(Dataset):
 
         return data
 
-    def __crop_data__(self, data, label):
-        """
-        Random crop with different methods:
-        """
-        # random center crop
-        data, label = self.__random_center_crop__(data, label)
-
-        return data, label
-
     def __training_data_process__(self, data, label):
         # crop data according net input size
         data = np.asanyarray(data.dataobj)
@@ -190,11 +155,9 @@ class SarcomaDataset(Dataset):
         # remap STS mask foreground (255) to class label 1
         label = self.__binarize_label__(label)
 
-        # drop out the invalid range
+        # drop out the invalid (empty background/air) range only -- no
+        # tumor-centric crop, so train-time scale matches test-time scale
         data, label = self.__drop_invalid_range__(data, label)
-
-        # crop data
-        data, label = self.__crop_data__(data, label)
 
         # resize data
         data = self.__resize_data__(data)
