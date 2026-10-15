@@ -84,7 +84,6 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
             loss = loss_value_seg
             loss.backward()
             optimizer.step()
-            scheduler.step()
 
             avg_batch_time = (time.time() - train_time_sp) / (1 + batch_id_sp)
             log.info(
@@ -105,6 +104,12 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
                         'state_dict': model.state_dict(),
                         'optimizer': optimizer.state_dict()},
                         model_save_path)
+
+        # scheduler steps once per epoch (not once per batch) so a
+        # 0.99 decay factor corresponds to ~1% decay per epoch, not per
+        # batch. Stepping per-batch was causing lr to collapse to ~0
+        # after only a handful of epochs, effectively freezing training.
+        scheduler.step()
 
         # always save a checkpoint at the end of each epoch so a full run
         # is never lost if save_interval doesn't line up with batches_per_epoch
