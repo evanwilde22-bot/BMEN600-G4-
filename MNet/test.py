@@ -62,7 +62,7 @@ def test(data_loader, model, img_names, sets):
         data = nib.load(os.path.join(sets.data_root, img_names[batch_id]))
         data = np.asanyarray(data.dataobj)
         [depth, height, width] = data.shape
-        mask = probs[0]
+        mask = probs[0].detach().cpu().numpy()
         scale = [1, depth*1.0/mask_d, height*1.0/mask_h, width*1.0/mask_w]
         mask = ndimage.zoom(mask, scale, order=1)
         mask = np.argmax(mask, axis=0)
