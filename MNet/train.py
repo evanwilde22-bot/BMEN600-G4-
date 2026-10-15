@@ -34,8 +34,7 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
     for epoch in range(total_epochs):
         log.info('Start epoch {}'.format(epoch))
         
-        scheduler.step()
-        log.info('lr = {}'.format(scheduler.get_lr()))
+        log.info('lr = {}'.format(scheduler.get_last_lr()))
         
         for batch_id, batch_data in enumerate(data_loader):
             # getting data batch
@@ -55,7 +54,7 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
                 [ori_c, ori_d, ori_h, ori_w] = label_mask.shape 
                 label_mask = np.reshape(label_mask, [ori_d, ori_h, ori_w])
                 scale = [d*1.0/ori_d, h*1.0/ori_h, w*1.0/ori_w]
-                label_mask = ndimage.interpolation.zoom(label_mask, scale, order=0)
+                label_mask = ndimage.zoom(label_mask, scale, order=0)
                 new_label_masks[label_id] = label_mask
 
             new_label_masks = torch.tensor(new_label_masks).to(torch.int64)
@@ -67,6 +66,7 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
             loss = loss_value_seg
             loss.backward()                
             optimizer.step()
+            scheduler.step()
 
             avg_batch_time = (time.time() - train_time_sp) / (1 + batch_id_sp)
             log.info(
