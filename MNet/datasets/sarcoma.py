@@ -17,6 +17,16 @@ recognize tumors at a scale it never sees during inference. To keep
 train/test preprocessing consistent, training uses the same
 drop-invalid-range + resize pipeline as testing.
 
+NOTE on augmentation: with the tumor-centric crop removed, training lost
+its only source of randomness -- every epoch saw the exact same
+deterministic volume for each case, which combined with a small dataset
+(~40 training cases) and training from scratch (no pretrained weights)
+caused severe overfitting (train Dice ~0.99, validation Dice ~0.01).
+Training now applies random axis flips and mild random intensity jitter.
+These augmentations don't change the physical scale/size of the tumor
+within the volume, so they don't reintroduce the train/test scale
+mismatch the crop removal was meant to fix.
+
 Expected file list format (train.txt / val.txt), one case per line:
     <relative image path> <relative mask path>
 
@@ -120,6 +130,31 @@ class SarcomaDataset(Dataset):
         else:
             return volume[min_z:max_z, min_h:max_h, min_w:max_w]
 
+    def __random_flip__(self, data, label):
+        """
+        Randomly flip the volume (and matching label) along each spatial
+        axis independently with 50% probability each. Flips don't change
+        tumor scale/size, only orientation, so they're safe augmentation
+        that doesn't reintroduce the train/test scale mismatch.
+        """
+        for axis in range(3):
+            if np.random.rand() < 0.5:
+                data = np.flip(data, axis=axis)
+                label = np.flip(label, axis=axis)
+        # copy needed since np.flip returns a view with negative strides,
+        # which torch.from_numpy can't handle directly
+        return np.ascontiguousarray(data), np.ascontiguousarray(label)
+
+    def __random_intensity_jitter__(self, data, scale_range=0.1, shift_range=0.1):
+        """
+        Apply a mild random per-volume intensity scale and shift. Helps
+        reduce overfitting to the exact intensity distribution of the
+        small training set, without altering anatomical geometry.
+        """
+        scale = 1.0 + np.random.uniform(-scale_range, scale_range)
+        shift = np.random.uniform(-shift_range, shift_range)
+        return data * scale + shift
+
     def __itensity_normalize_one_volume__(self, volume):
         """
         normalize the itensity of an nd volume based on the mean and std of nonzeor region
@@ -158,6 +193,12 @@ class SarcomaDataset(Dataset):
         # drop out the invalid (empty background/air) range only -- no
         # tumor-centric crop, so train-time scale matches test-time scale
         data, label = self.__drop_invalid_range__(data, label)
+
+        # random augmentation (train only): flips + mild intensity jitter.
+        # Neither changes tumor scale, so train/test scale consistency is
+        # preserved while still giving the model varied training samples.
+        data, label = self.__random_flip__(data, label)
+        data = self.__random_intensity_jitter__(data)
 
         # resize data
         data = self.__resize_data__(data)
