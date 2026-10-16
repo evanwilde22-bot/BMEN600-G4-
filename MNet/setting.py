@@ -120,6 +120,14 @@ def parse_opts():
         type=str,
         help='Shortcut type of resnet (A | B)')
     parser.add_argument(
+        '--dropout_prob',
+        default=0.0,
+        type=float,
+        help='Dropout3d probability applied to backbone features before '
+             'the segmentation head. 0.0 reproduces original behavior. '
+             'A moderate value (e.g. 0.2-0.3) helps fight overfitting on '
+             'small training sets.')
+    parser.add_argument(
         '--manual_seed', default=1, type=int, help='Manually set random seed')
     parser.add_argument(
         '--ci_test', action='store_true', help='If true, ci testing is used.')
