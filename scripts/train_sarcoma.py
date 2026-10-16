@@ -7,12 +7,22 @@ BrainS18Dataset. The original MNet/train.py is left untouched.
 
 NOTE on loss: sarcoma tumors occupy a tiny fraction of total image volume,
 so a plain unweighted CrossEntropyLoss can reach a very low value simply by
-predicting "background" everywhere -- training loss looking good is *not*
-evidence the model is actually segmenting tumors. To counter this severe
-class imbalance, the loss here combines:
-  1. CrossEntropyLoss with a higher weight on the foreground (tumor) class
+predicting "background" everywhere. To counter this class imbalance without
+overcorrecting (an earlier, too-aggressive weight of 20x pushed the model
+to over-predict foreground, which also hurts Dice via poor precision), the
+loss here combines:
+  1. CrossEntropyLoss with a moderate weight on the foreground (tumor) class
   2. Soft Dice loss, which directly optimizes voxel overlap and is
      naturally robust to class imbalance (same idea used in nnU-Net, etc.)
+
+NOTE on model selection: with ~40 training cases, the best-generalizing
+epoch is very unlikely to be the last one -- late epochs are where
+overfitting creeps in (we previously saw train Dice ~0.99 with val Dice
+~0.01 using the final-epoch checkpoint). If --val_img_list is provided,
+this script evaluates Dice on that list every --val_interval epochs (and
+always on the final epoch) and additionally saves the best-scoring
+checkpoint as <save_folder>_best.pth.tar, so you don't have to guess which
+epoch to evaluate after training finishes.
 
 Run from the MNet directory so relative imports resolve, e.g.:
 
@@ -21,7 +31,8 @@ Run from the MNet directory so relative imports resolve, e.g.:
         --resnet_shortcut A --input_D 32 --input_H 160 --input_W 160 \
         --batch_size 1 --n_epochs 50 --pretrain_path="" \
         --data_root "C:\\path\\to\\nifti" \
-        --img_list "C:\\path\\to\\nifti\\train.txt"
+        --img_list "C:\\path\\to\\nifti\\train.txt" \
+        --val_img_list "C:\\path\\to\\nifti\\val.txt"
 '''
 
 import os
@@ -34,6 +45,7 @@ from torch import nn
 from torch import optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from scipy import ndimage
 
 # allow running this script from either the MNet directory or scripts/
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -47,12 +59,14 @@ from setting import parse_opts
 from model import generate_model
 from datasets.sarcoma import SarcomaDataset
 from utils.logger import log
+from utils.file_process import load_lines
 
 # weight given to the tumor (foreground) class relative to background in
-# CrossEntropyLoss. Tune this based on your actual tumor:background voxel
-# ratio -- larger values push the model harder towards predicting
-# foreground when uncertain. Background stays at weight 1.0.
-FOREGROUND_CE_WEIGHT = 20.0
+# CrossEntropyLoss. 20.0 was tried previously and over-corrected (model
+# over-predicted foreground, hurting Dice via poor precision). A more
+# moderate weight is used here, relying on the Dice loss term to do most
+# of the imbalance-robustness work.
+FOREGROUND_CE_WEIGHT = 6.0
 
 
 def dice_loss(logits, target, smooth=1e-5):
@@ -69,6 +83,66 @@ def dice_loss(logits, target, smooth=1e-5):
     return 1.0 - (2.0 * intersection + smooth) / (denom + smooth)
 
 
+def seg_eval_dice(pred, label, smooth=1e-5):
+    """Hard Dice for the foreground class, used for in-training validation."""
+    pred_fg = (pred == 1)
+    label_fg = (label == 1)
+    inter = np.logical_and(pred_fg, label_fg).sum()
+    denom = pred_fg.sum() + label_fg.sum()
+    if denom == 0:
+        return 1.0 if inter == 0 else 0.0
+    return (2.0 * inter + smooth) / (denom + smooth)
+
+
+def run_validation(model, sets, val_img_list):
+    """
+    Runs inference over the validation list and returns mean foreground
+    Dice. Uses the same preprocessing path as scripts/test_sarcoma.py
+    (SarcomaDataset in 'test' phase: trim invalid range, resize, normalize
+    -- no augmentation), so numbers are directly comparable to a standalone
+    test_sarcoma.py run on the same checkpoint.
+    """
+    import nibabel as nib
+
+    val_sets = sets
+    orig_phase = sets.phase
+    val_sets.phase = 'test'
+
+    testing_data = SarcomaDataset(sets.data_root, val_img_list, val_sets)
+    data_loader = DataLoader(testing_data, batch_size=1, shuffle=False, num_workers=0, pin_memory=False)
+
+    img_names = [info.split(" ")[0] for info in load_lines(val_img_list)]
+    label_names = [info.split(" ")[1] for info in load_lines(val_img_list)]
+
+    model.eval()
+    dices = []
+    with torch.no_grad():
+        for batch_id, volume in enumerate(data_loader):
+            if not sets.no_cuda:
+                volume = volume.cuda()
+            probs = model(volume)
+            probs = F.softmax(probs, dim=1)
+
+            [_, _, mask_d, mask_h, mask_w] = probs.shape
+            img = nib.load(os.path.join(sets.data_root, img_names[batch_id]))
+            img = np.asanyarray(img.dataobj)
+            [depth, height, width] = img.shape
+            mask = probs[0].detach().cpu().numpy()
+            scale = [1, depth * 1.0 / mask_d, height * 1.0 / mask_h, width * 1.0 / mask_w]
+            mask = ndimage.zoom(mask, scale, order=1)
+            mask = np.argmax(mask, axis=0)
+
+            label = nib.load(os.path.join(sets.data_root, label_names[batch_id]))
+            label = np.asanyarray(label.dataobj)
+            label = np.where(label > 0, 1, 0)
+
+            dices.append(seg_eval_dice(mask, label))
+
+    model.train()
+    val_sets.phase = orig_phase
+    return float(np.mean(dices)) if dices else 0.0
+
+
 def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval, save_folder, sets):
     batches_per_epoch = len(data_loader)
     log.info('{} epochs in total, {} batches per epoch'.format(total_epochs, batches_per_epoch))
@@ -80,6 +154,9 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
     print("\n\n")
     if not sets.no_cuda:
         loss_seg = loss_seg.cuda()
+
+    best_val_dice = -1.0
+    best_epoch = -1
 
     model.train()
     train_time_sp = time.time()
@@ -103,7 +180,6 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
                 [ori_c, ori_d, ori_h, ori_w] = label_mask.shape
                 label_mask = np.reshape(label_mask, [ori_d, ori_h, ori_w])
                 scale = [d * 1.0 / ori_d, h * 1.0 / ori_h, w * 1.0 / ori_w]
-                from scipy import ndimage
                 label_mask = ndimage.zoom(label_mask, scale, order=0)
                 new_label_masks[label_id] = label_mask
 
@@ -155,6 +231,32 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
             'state_dict': model.state_dict(),
             'optimizer': optimizer.state_dict()},
             model_save_path)
+
+        # optional in-training validation: evaluate Dice periodically (and
+        # always on the last epoch) and track/save the best checkpoint, so
+        # we don't have to guess which epoch generalizes best after the
+        # fact.
+        is_last_epoch = (epoch == total_epochs - 1)
+        if sets.val_img_list and ((epoch + 1) % sets.val_interval == 0 or is_last_epoch):
+            val_dice = run_validation(model, sets, sets.val_img_list)
+            log.info('Epoch {}: validation mean Dice (class 1) = {:.4f}'.format(epoch, val_dice))
+            print('Epoch {}: validation mean Dice (class 1) = {:.4f}'.format(epoch, val_dice))
+            if val_dice > best_val_dice:
+                best_val_dice = val_dice
+                best_epoch = epoch
+                best_save_path = '{}_best.pth.tar'.format(save_folder)
+                torch.save({
+                    'epoch': epoch,
+                    'val_dice': val_dice,
+                    'state_dict': model.state_dict(),
+                    'optimizer': optimizer.state_dict()},
+                    best_save_path)
+                log.info('New best checkpoint: epoch {}, val Dice {:.4f} -> {}'
+                          .format(epoch, val_dice, best_save_path))
+
+    if sets.val_img_list:
+        print('Best validation Dice: {:.4f} at epoch {} (saved to {}_best.pth.tar)'
+              .format(best_val_dice, best_epoch, save_folder))
 
     print('Finished training')
     if sets.ci_test:
