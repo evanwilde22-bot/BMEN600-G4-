@@ -18,6 +18,19 @@ def parse_opts():
         type=str,
         help='Path for image list file')
     parser.add_argument(
+        '--val_img_list',
+        default='',
+        type=str,
+        help='(Optional) path for a validation image list file. If set, '
+             'scripts/train_sarcoma.py will periodically evaluate Dice on '
+             'this list during training and save the best checkpoint.')
+    parser.add_argument(
+        '--val_interval',
+        default=5,
+        type=int,
+        help='Run in-training validation every N epochs (only used when '
+             '--val_img_list is set). The final epoch is always validated.')
+    parser.add_argument(
         '--n_seg_classes',
         default=2,
         type=int,
