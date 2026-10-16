@@ -119,7 +119,8 @@ class ResNet(nn.Module):
                  sample_input_W,
                  num_seg_classes,
                  shortcut_type='B',
-                 no_cuda = False):
+                 no_cuda = False,
+                 dropout_prob=0.0):
         self.inplanes = 64
         self.no_cuda = no_cuda
         super(ResNet, self).__init__()
@@ -141,6 +142,16 @@ class ResNet(nn.Module):
             block, 256, layers[2], shortcut_type, stride=1, dilation=2)
         self.layer4 = self._make_layer(
             block, 512, layers[3], shortcut_type, stride=1, dilation=4)
+
+        # Dropout3d applied to the backbone feature map before the
+        # segmentation head. With a small training set (~40 STS cases),
+        # the 3D-ResNet backbone can overfit heavily (we observed train
+        # Dice ~0.99 vs validation Dice ~0.01 in earlier runs); dropout
+        # here adds regularization at inference-relevant feature scale
+        # without touching the (already-small) pretrained backbone
+        # weights' structure. dropout_prob=0.0 (default) exactly
+        # reproduces the original architecture/behavior.
+        self.feature_dropout = nn.Dropout3d(p=dropout_prob)
 
         self.conv_seg = nn.Sequential(
                                         nn.ConvTranspose3d(
@@ -210,6 +221,7 @@ class ResNet(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
+        x = self.feature_dropout(x)
         x = self.conv_seg(x)
 
         return x
