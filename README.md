@@ -203,7 +203,7 @@ Run from the `MNet/` directory (so `pretrain/...` and `trails/...` paths resolve
 ```bash
 cd MNet
 python ../scripts/train_sarcoma.py --gpu_id 0 --model_depth 18 --resnet_shortcut A \
-  --input_D 32 --input_H 160 --input_W 160 --batch_size 1 --n_epochs 30 \
+  --input_D 32 --input_H 160 --input_W 160 --batch_size 1 --n_epochs 30 --dropout_prob 0.2 \
   --pretrain_path "pretrain/resnet_18.pth" \
   --data_root "/path/to/STS-nifti/nifti" \
   --img_list "/path/to/STS-nifti/nifti/train.txt"
@@ -214,7 +214,7 @@ python ../scripts/train_sarcoma.py --gpu_id 0 --model_depth 18 --resnet_shortcut
 ```powershell
 cd MNet
 python ..\scripts\train_sarcoma.py --gpu_id 0 --model_depth 18 --resnet_shortcut A `
-  --input_D 32 --input_H 160 --input_W 160 --batch_size 1 --n_epochs 30 `
+  --input_D 32 --input_H 160 --input_W 160 --batch_size 1 --n_epochs 30 --dropout_prob 0.2 `
   --pretrain_path "pretrain/resnet_18.pth" `
   --data_root "C:\path\to\STS-nifti\nifti" `
   --img_list "C:\path\to\STS-nifti\nifti\train.txt"
@@ -227,6 +227,9 @@ Variations:
 - **Multi-GPU:** `--gpu_id 0 1`.
 - **Quick smoke test:** `--n_epochs 1`.
 - **Resume from your own checkpoint:** add `--resume_path trails/models/sarcoma_resnet_18_epoch_<N>_final.pth.tar`.
+- **Dropout:** `--dropout_prob 0.2` (as in the examples above; default `0.0`) helps counter the overfitting documented on this small (~40 case) dataset.
+- **Validation cadence:** `--val_interval` (default `5`) can be lowered, e.g. `--val_interval 2`, for short resumed training sessions so best-checkpoint tracking (requires `--val_img_list`) has enough samples to find a good epoch within a short run, at the cost of extra evaluation overhead per run.
+- **Auto-pick a checkpoint to resume:** see `scripts/resume_latest.ps1` in [`scripts/README.md`](scripts/README.md).
 - Other depths: change `--model_depth`/`--resnet_shortcut` **and** the weights file (see the table in step 2).
 
 Outputs:

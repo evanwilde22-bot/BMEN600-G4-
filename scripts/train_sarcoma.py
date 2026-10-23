@@ -29,7 +29,7 @@ Run from the MNet directory so relative imports resolve, e.g.:
     cd MNet
     python ../scripts/train_sarcoma.py --gpu_id 0 --model_depth 18 \
         --resnet_shortcut A --input_D 32 --input_H 160 --input_W 160 \
-        --batch_size 1 --n_epochs 50 --pretrain_path="" \
+        --batch_size 1 --n_epochs 50 --dropout_prob 0.2 --pretrain_path="" \
         --data_root "C:\\path\\to\\nifti" \
         --img_list "C:\\path\\to\\nifti\\train.txt" \
         --val_img_list "C:\\path\\to\\nifti\\val.txt"
