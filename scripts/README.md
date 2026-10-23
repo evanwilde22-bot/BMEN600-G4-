@@ -76,3 +76,22 @@ python train.py --gpu_id 0 --model_depth 18 --resnet_shortcut A `
   --img_list "C:\Users\Evan\Documents\ManskeLab\BMEN600\NIFTI\STS-nifti\nifti\train.txt" `
   --pretrain_path=""
 ```
+
+## Resuming from the latest checkpoint (`resume_latest.ps1`)
+
+`resume_latest.ps1` picks a checkpoint for `train_sarcoma.py --resume_path`. It prefers `MNet/trails/models/sarcoma_resnet_<depth>_best.pth.tar` (best validation Dice, saved when `--val_img_list` is set), falls back to the most recently modified `sarcoma_resnet_<depth>_epoch_*_final.pth.tar`, and otherwise returns an empty string so training starts from `--pretrain_path`. `-ModelDepth` defaults to 18.
+
+```powershell
+$resume = & ./scripts/resume_latest.ps1 -ModelDepth 18
+cd MNet
+python ..\scripts\train_sarcoma.py --gpu_id 0 --model_depth 18 --resnet_shortcut A `
+  --input_D 32 --input_H 160 --input_W 160 --batch_size 1 --n_epochs 30 `
+  --dropout_prob 0.2 --val_interval 2 `
+  --pretrain_path "pretrain/resnet_18.pth" `
+  --resume_path $resume `
+  --data_root "C:\path\to\STS-nifti\nifti" `
+  --img_list "C:\path\to\STS-nifti\nifti\train.txt" `
+  --val_img_list "C:\path\to\STS-nifti\nifti\val.txt"
+```
+
+`--dropout_prob 0.2` counters overfitting on the small STS dataset, and a lower `--val_interval` gives best-checkpoint tracking more samples in short resumed runs (at the cost of extra evaluation time).
