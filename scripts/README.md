@@ -60,12 +60,35 @@ Arguments:
 | Flag | Default | Description |
 |---|---|---|
 | `--data_root` | (required) | Root directory containing `STS_XXX` case folders |
-| `--modality` | `RTstruct_T1` | Modality subfolder (`RTstruct_T1`, `RTstruct_T2FS`, `RTstruct_CT`, `RTstruct_PET`, `RTstruct_AlignedT1toPET`, `RTstruct_AlignedT2FStoPET`) |
+| `--modality` | `RTstruct_T1` | One or more modality subfolders (`RTstruct_T1`, `RTstruct_T2FS`, `RTstruct_CT`, `RTstruct_PET`, `RTstruct_AlignedT1toPET`, `RTstruct_AlignedT2FStoPET`) |
 | `--image_file` | `image.nii.gz` | Image filename within the modality folder |
 | `--mask` | `mask_GTV_Mass.nii.gz` | Mask filename within the modality folder (or `mask_GTV_Edema.nii.gz`) |
 | `--val_fraction` | `0.2` | Fraction of cases reserved for validation |
 | `--seed` | `1` | Random seed for the shuffle/split |
 | `--case_prefix` | `STS_` | Prefix used to identify case folders |
+
+### Multi-modality trial (T1, T2FS, and both PET-aligned)
+
+Pass several modalities to pool them into a single train/val split. Each
+available modality of a case becomes its own single-channel sample, and the
+split is done per case so no patient appears in both train and val.
+
+```bash
+python scripts/generate_file_lists.py \
+  --data_root "/path/to/STS-nifti" --mask mask_GTV_Mass.nii.gz \
+  --modality RTstruct_T1 RTstruct_T2FS RTstruct_AlignedT1toPET RTstruct_AlignedT2FStoPET
+
+cd MNet
+python ../scripts/train_sarcoma.py --gpu_id 0 --model_depth 18 --resnet_shortcut A \
+  --input_D 32 --input_H 160 --input_W 160 --batch_size 1 --n_epochs 50 \
+  --dropout_prob 0.2 --pretrain_path "" \
+  --data_root "/path/to/STS-nifti" \
+  --img_list "/path/to/STS-nifti/train.txt" \
+  --val_img_list "/path/to/STS-nifti/val.txt"
+```
+
+Add `--resume_path <checkpoint>` to continue from an existing checkpoint
+(the input layer is unchanged, so checkpoints stay compatible).
 
 After running, point MNet's training/testing at the generated lists:
 
