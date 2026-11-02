@@ -1,4 +1,4 @@
-"""
+r"""
 Generates train.txt / val.txt file lists for MNet training on the
 Soft-tissue-Sarcoma (STS) NIfTI dataset.
 
@@ -21,6 +21,10 @@ Expected directory layout (per case):
 
 Usage:
     python generate_file_lists.py --data_root "C:\path\to\nifti" --modality RTstruct_T1 --mask mask_GTV_Mass.nii.gz
+
+    # T1, T2FS and both PET-aligned volumes in one trial:
+    python generate_file_lists.py --data_root "C:\\path\\to\\nifti" --mask mask_GTV_Mass.nii.gz \\
+        --modality RTstruct_T1 RTstruct_T2FS RTstruct_AlignedT1toPET RTstruct_AlignedT2FStoPET
 """
 
 import os
@@ -32,9 +36,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Generate train/val file lists for STS NIfTI data")
     parser.add_argument("--data_root", type=str, required=True,
                          help="Root directory containing STS_XXX case folders")
-    parser.add_argument("--modality", type=str, default="RTstruct_T1",
-                         help="Modality subfolder name (e.g. RTstruct_T1, RTstruct_CT, RTstruct_T2FS, "
-                              "RTstruct_PET, RTstruct_AlignedT1toPET, RTstruct_AlignedT2FStoPET)")
+    parser.add_argument("--modality", type=str, nargs="+", default=["RTstruct_T1"],
+                         help="One or more modality subfolder names (e.g. RTstruct_T1 RTstruct_T2FS "
+                              "RTstruct_AlignedT1toPET RTstruct_AlignedT2FStoPET). With several, every "
+                              "available modality of a case becomes a training sample, and cases are "
+                              "split train/val as a unit (no leakage across modalities).")
     parser.add_argument("--image_file", type=str, default="image.nii.gz",
                          help="Image filename within each modality folder")
     parser.add_argument("--mask", type=str, default="mask_GTV_Mass.nii.gz",
@@ -56,34 +62,40 @@ def main():
     cases = sorted([d for d in os.listdir(args.data_root)
                      if d.startswith(args.case_prefix) and os.path.isdir(os.path.join(args.data_root, d))])
 
-    pairs = []
+    case_pairs = {}
     skipped = []
 
     for case in cases:
-        img_rel = os.path.join(case, args.modality, args.image_file)
-        mask_rel = os.path.join(case, args.modality, args.mask)
-        img_full = os.path.join(args.data_root, img_rel)
-        mask_full = os.path.join(args.data_root, mask_rel)
-
-        if os.path.isfile(img_full) and os.path.isfile(mask_full):
-            # normalize to forward slashes for cross-platform consistency
-            pairs.append((img_rel.replace("\\", "/"), mask_rel.replace("\\", "/")))
-        else:
-            skipped.append(case)
+        found = []
+        for modality in args.modality:
+            img_rel = os.path.join(case, modality, args.image_file)
+            mask_rel = os.path.join(case, modality, args.mask)
+            if (os.path.isfile(os.path.join(args.data_root, img_rel))
+                    and os.path.isfile(os.path.join(args.data_root, mask_rel))):
+                # normalize to forward slashes for cross-platform consistency
+                found.append((img_rel.replace("\\", "/"), mask_rel.replace("\\", "/")))
+            else:
+                skipped.append(f"{case}/{modality}")
+        if found:
+            case_pairs[case] = found
 
     if skipped:
-        print(f"Skipped {len(skipped)} cases missing {args.modality}/{args.image_file} or {args.mask}:")
+        print(f"Skipped {len(skipped)} missing {args.image_file} or {args.mask}:")
         for s in skipped:
             print(f"  - {s}")
 
-    if not pairs:
+    if not case_pairs:
         print("No valid image/mask pairs found. Check --data_root, --modality, and --mask arguments.")
         return
 
-    random.shuffle(pairs)
-    n_val = max(1, int(len(pairs) * args.val_fraction))
-    val_pairs = pairs[:n_val]
-    train_pairs = pairs[n_val:]
+    # split by case so all modalities of one patient land on the same side
+    case_ids = list(case_pairs)
+    random.shuffle(case_ids)
+    n_val = max(1, int(len(case_ids) * args.val_fraction))
+    val_pairs = [p for c in case_ids[:n_val] for p in case_pairs[c]]
+    train_pairs = [p for c in case_ids[n_val:] for p in case_pairs[c]]
+    random.shuffle(train_pairs)
+    pairs = val_pairs + train_pairs
 
     train_path = os.path.join(args.data_root, "train.txt")
     val_path = os.path.join(args.data_root, "val.txt")
@@ -96,7 +108,7 @@ def main():
         for img, mask in val_pairs:
             f.write(f"{img} {mask}\n")
 
-    print(f"\nTotal usable cases: {len(pairs)} | Train: {len(train_pairs)} | Val: {len(val_pairs)}")
+    print(f"\nCases: {len(case_ids)} | Total samples: {len(pairs)} | Train: {len(train_pairs)} | Val: {len(val_pairs)}")
     print(f"Wrote {train_path}")
     print(f"Wrote {val_path}")
 
