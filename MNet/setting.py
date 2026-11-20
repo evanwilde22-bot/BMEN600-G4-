@@ -31,6 +31,16 @@ def parse_opts():
         help='Run in-training validation every N epochs (only used when '
              '--val_img_list is set). The final epoch is always validated.')
     parser.add_argument(
+        '--consistent_preprocessing', action='store_true',
+        help='Use full-volume, deterministic normalization for training and '
+             'inference; required for late-fusion models.')
+    parser.add_argument(
+        '--output_prefix', default='',
+        help='Checkpoint path prefix for sarcoma training.')
+    parser.add_argument(
+        '--modality_name', choices=['ct', 't1', 't2', 'pet'], default=None,
+        help='Record the modality in checkpoints for late-fusion training.')
+    parser.add_argument(
         '--n_seg_classes',
         default=2,
         type=int,

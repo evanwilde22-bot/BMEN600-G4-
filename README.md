@@ -25,6 +25,9 @@ BMEN600-G4-/
 
 See [`MNet/README.md`](MNet/README.md) for the upstream MedicalNet documentation and [`scripts/README.md`](scripts/README.md) for the dataset scripts.
 
+For independent CT, T1, T2FS/STIR and PET models with weighted prediction
+fusion, see the [late-fusion workflow](scripts/README.md#late-fusion-of-four-native-modalities).
+
 ## Quick start
 
 1. [Install](#1-install) (one-time)
@@ -276,7 +279,7 @@ Output: `mean dice for class-1 is <value>`. (Add `--no_cuda` on CPU-only machine
 
 | Area | Change |
 |---|---|
-| `MNet/datasets/sarcoma.py` (new) | `SarcomaDataset` for the STS NIfTI data. Remaps mask foreground (`255`) to class `1`. **Training uses the same preprocessing as testing** (trim empty background, resize, intensity-normalize) with **no tumor-centered random crop**, so tumor scale matches between training and inference. Training-only augmentation: random per-axis flips and mild intensity scale/shift. |
+| `MNet/datasets/sarcoma.py` (new) | `SarcomaDataset` for the STS NIfTI data. Remaps mask foreground (`255`) to class `1`. The legacy training path trims background, but test preprocessing does not. The opt-in `--consistent_preprocessing` mode uses full-volume resizing and the same normalization in both phases. Training-only augmentation includes random flips and intensity jitter. |
 | `MNet/model.py` | Pre-trained weights are loaded with `torch.load(..., weights_only=True, map_location='cpu')` (PyTorch >= 2.6 safe loading) and are only loaded when `--phase` is not `test`; with `--pretrain_path` set, the new `conv_seg` head gets a 100x learning rate vs. the backbone. |
 | `MNet/requirements.txt` | `torch>=2.6.0`, `numpy>=1.22.0`, `scipy>=1.8.0` (security advisories in the original pins). |
 | `scripts/train_sarcoma.py` | Uses `SarcomaDataset`. Loss = class-weighted cross-entropy (tumor weight `FOREGROUND_CE_WEIGHT = 20`) **+ soft Dice loss** to counter extreme tumor/background class imbalance. `ExponentialLR` (gamma 0.99) now steps **once per epoch** (it was per batch, which collapsed the learning rate). Saves a checkpoint every epoch. |

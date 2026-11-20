@@ -7,15 +7,9 @@ segmentation masks, since the STS RTSTRUCT-derived masks are stored with
 foreground voxels at 255 (not 1). Without this remap, CrossEntropyLoss
 would receive out-of-range class labels during training/evaluation.
 
-NOTE on cropping: training intentionally does NOT use a random tumor-centric
-crop (unlike the original brains18.py). Testing has no knowledge of where
-the tumor is, so it only trims empty background/air (__drop_invalid_range__)
-before resizing to the network input size. If training cropped tightly
-around the tumor, the tumor would occupy a much larger fraction of the
-resized volume at train time than at test time, teaching the model to
-recognize tumors at a scale it never sees during inference. To keep
-train/test preprocessing consistent, training uses the same
-drop-invalid-range + resize pipeline as testing.
+The legacy training path trims background before resizing, while legacy
+testing resizes the full volume. The opt-in consistent_preprocessing mode
+uses the full volume and the same normalization for training and testing.
 
 NOTE on augmentation: with the tumor-centric crop removed, training lost
 its only source of randomness -- every epoch saw the exact same
@@ -42,6 +36,25 @@ import nibabel
 from scipy import ndimage
 
 
+def normalize_consistent_volume(volume):
+    volume = np.asarray(volume, dtype=np.float32)
+    if not np.isfinite(volume).all():
+        raise ValueError("Image contains non-finite intensities")
+    pixels = volume[volume != 0]
+    if not pixels.size or pixels.std() == 0:
+        raise ValueError("Image has no intensity variation")
+    normalized = (volume - pixels.mean()) / pixels.std()
+    normalized[volume == 0] = 0
+    return normalized
+
+
+def resize_volume(data, input_size):
+    if data.ndim != 3:
+        raise ValueError(f"Expected a 3D image, got shape {data.shape}")
+    scale = [target / actual for target, actual in zip(input_size, data.shape)]
+    return ndimage.zoom(data, scale, order=0)
+
+
 class SarcomaDataset(Dataset):
 
     def __init__(self, root_dir, img_list, sets):
@@ -53,6 +66,7 @@ class SarcomaDataset(Dataset):
         self.input_H = sets.input_H
         self.input_W = sets.input_W
         self.phase = sets.phase
+        self.consistent_preprocessing = getattr(sets, 'consistent_preprocessing', False)
 
     def __nii2tensorarray__(self, data):
         [z, y, x] = data.shape
@@ -77,6 +91,9 @@ class SarcomaDataset(Dataset):
             assert img is not None
             mask = nibabel.load(label_name)
             assert mask is not None
+            if self.consistent_preprocessing and (
+                    img.shape != mask.shape or not np.allclose(img.affine, mask.affine, atol=1e-3)):
+                raise ValueError(f"Image and mask grids differ: {img_name}, {label_name}")
 
             # data processing
             img_array, mask_array = self.__training_data_process__(img, mask)
@@ -176,11 +193,7 @@ class SarcomaDataset(Dataset):
         """
         Resize the data to the input size
         """
-        [depth, height, width] = data.shape
-        scale = [self.input_D * 1.0 / depth, self.input_H * 1.0 / height, self.input_W * 1.0 / width]
-        data = ndimage.zoom(data, scale, order=0)
-
-        return data
+        return resize_volume(data, (self.input_D, self.input_H, self.input_W))
 
     def __training_data_process__(self, data, label):
         # crop data according net input size
@@ -192,20 +205,25 @@ class SarcomaDataset(Dataset):
 
         # drop out the invalid (empty background/air) range only -- no
         # tumor-centric crop, so train-time scale matches test-time scale
-        data, label = self.__drop_invalid_range__(data, label)
+        if not self.consistent_preprocessing:
+            data, label = self.__drop_invalid_range__(data, label)
 
         # random augmentation (train only): flips + mild intensity jitter.
         # Neither changes tumor scale, so train/test scale consistency is
         # preserved while still giving the model varied training samples.
         data, label = self.__random_flip__(data, label)
-        data = self.__random_intensity_jitter__(data)
+        if not self.consistent_preprocessing:
+            data = self.__random_intensity_jitter__(data)
 
         # resize data
         data = self.__resize_data__(data)
         label = self.__resize_data__(label)
 
         # normalization datas
-        data = self.__itensity_normalize_one_volume__(data)
+        if self.consistent_preprocessing:
+            data = self.__random_intensity_jitter__(normalize_consistent_volume(data))
+        else:
+            data = self.__itensity_normalize_one_volume__(data)
 
         return data, label
 
@@ -217,6 +235,9 @@ class SarcomaDataset(Dataset):
         data = self.__resize_data__(data)
 
         # normalization datas
-        data = self.__itensity_normalize_one_volume__(data)
+        if self.consistent_preprocessing:
+            data = normalize_consistent_volume(data)
+        else:
+            data = self.__itensity_normalize_one_volume__(data)
 
         return data

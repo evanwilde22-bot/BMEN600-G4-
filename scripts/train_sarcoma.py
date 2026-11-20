@@ -83,6 +83,12 @@ def dice_loss(logits, target, smooth=1e-5):
     return 1.0 - (2.0 * intersection + smooth) / (denom + smooth)
 
 
+def loss_inputs_at_input_resolution(logits, labels):
+    labels = labels[:, 0].to(device=logits.device, dtype=torch.int64)
+    logits = F.interpolate(logits, size=labels.shape[1:], mode='trilinear', align_corners=False)
+    return logits, labels
+
+
 def seg_eval_dice(pred, label, smooth=1e-5):
     """Hard Dice for the foreground class, used for in-training validation."""
     pred_fg = (pred == 1)
@@ -98,8 +104,8 @@ def run_validation(model, sets, val_img_list):
     """
     Runs inference over the validation list and returns mean foreground
     Dice. Uses the same preprocessing path as scripts/test_sarcoma.py
-    (SarcomaDataset in 'test' phase: trim invalid range, resize, normalize
-    -- no augmentation), so numbers are directly comparable to a standalone
+    (SarcomaDataset in 'test' phase: resize and normalize without
+    augmentation), so numbers are directly comparable to a standalone
     test_sarcoma.py run on the same checkpoint.
     """
     import nibabel as nib
@@ -146,6 +152,13 @@ def run_validation(model, sets, val_img_list):
 def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval, save_folder, sets):
     batches_per_epoch = len(data_loader)
     log.info('{} epochs in total, {} batches per epoch'.format(total_epochs, batches_per_epoch))
+    preprocessing = {
+        'consistent': sets.consistent_preprocessing,
+        'input_size': [sets.input_D, sets.input_H, sets.input_W],
+        'model_depth': sets.model_depth,
+        'resnet_shortcut': sets.resnet_shortcut,
+        'modality': sets.modality_name,
+    }
     class_weights = torch.tensor([1.0, FOREGROUND_CE_WEIGHT])
     loss_seg = nn.CrossEntropyLoss(weight=class_weights, ignore_index=-1)
 
@@ -173,19 +186,22 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
 
             optimizer.zero_grad()
             out_masks = model(volumes)
-            [n, _, d, h, w] = out_masks.shape
-            new_label_masks = np.zeros([n, d, h, w])
-            for label_id in range(n):
-                label_mask = label_masks[label_id]
-                [ori_c, ori_d, ori_h, ori_w] = label_mask.shape
-                label_mask = np.reshape(label_mask, [ori_d, ori_h, ori_w])
-                scale = [d * 1.0 / ori_d, h * 1.0 / ori_h, w * 1.0 / ori_w]
-                label_mask = ndimage.zoom(label_mask, scale, order=0)
-                new_label_masks[label_id] = label_mask
+            if sets.consistent_preprocessing:
+                out_masks, new_label_masks = loss_inputs_at_input_resolution(out_masks, label_masks)
+            else:
+                [n, _, d, h, w] = out_masks.shape
+                new_label_masks = np.zeros([n, d, h, w])
+                for label_id in range(n):
+                    label_mask = label_masks[label_id]
+                    [ori_c, ori_d, ori_h, ori_w] = label_mask.shape
+                    label_mask = np.reshape(label_mask, [ori_d, ori_h, ori_w])
+                    scale = [d * 1.0 / ori_d, h * 1.0 / ori_h, w * 1.0 / ori_w]
+                    label_mask = ndimage.zoom(label_mask, scale, order=0)
+                    new_label_masks[label_id] = label_mask
 
-            new_label_masks = torch.tensor(new_label_masks).to(torch.int64)
-            if not sets.no_cuda:
-                new_label_masks = new_label_masks.cuda()
+                new_label_masks = torch.tensor(new_label_masks).to(torch.int64)
+                if not sets.no_cuda:
+                    new_label_masks = new_label_masks.cuda()
 
             loss_value_seg = loss_seg(out_masks, new_label_masks)
             loss_value_dice = dice_loss(out_masks, new_label_masks)
@@ -210,6 +226,7 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
                     torch.save({
                         'epoch': epoch,
                         'batch_id': batch_id,
+                        'preprocessing': preprocessing,
                         'state_dict': model.state_dict(),
                         'optimizer': optimizer.state_dict()},
                         model_save_path)
@@ -228,6 +245,7 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
             os.makedirs(model_save_dir)
         torch.save({
             'epoch': epoch,
+            'preprocessing': preprocessing,
             'state_dict': model.state_dict(),
             'optimizer': optimizer.state_dict()},
             model_save_path)
@@ -248,6 +266,7 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
                 torch.save({
                     'epoch': epoch,
                     'val_dice': val_dice,
+                    'preprocessing': preprocessing,
                     'state_dict': model.state_dict(),
                     'optimizer': optimizer.state_dict()},
                     best_save_path)
@@ -265,7 +284,7 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
 
 if __name__ == '__main__':
     sets = parse_opts()
-    sets.save_folder = "./trails/models/sarcoma_{}_{}".format(sets.model, sets.model_depth)
+    sets.save_folder = sets.output_prefix or "./trails/models/sarcoma_{}_{}".format(sets.model, sets.model_depth)
 
     torch.manual_seed(sets.manual_seed)
     model, parameters = generate_model(sets)

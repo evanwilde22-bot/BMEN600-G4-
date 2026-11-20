@@ -118,7 +118,27 @@ def generate_model(opt):
             raise Exception(f"加载模型时发生未知错误：{e}") from e
         
         
-        pretrain_dict = {k: v for k, v in pretrain['state_dict'].items() if k in net_dict.keys()}
+        pretrain_dict = {}
+        pretrained_backbone = {}
+        for key, value in pretrain['state_dict'].items():
+            bare_key = key.removeprefix('module.')
+            if bare_key.startswith(('conv1.', 'bn1.', 'layer1.', 'layer2.', 'layer3.', 'layer4.')):
+                pretrained_backbone[bare_key] = value
+            model_key = 'module.' + bare_key if 'module.conv1.weight' in net_dict else bare_key
+            if model_key in net_dict and value.shape == net_dict[model_key].shape:
+                pretrain_dict[model_key] = value
+        model_backbone = {k.removeprefix('module.'): v for k, v in net_dict.items()
+                          if k.removeprefix('module.').startswith(
+                              ('conv1.', 'bn1.', 'layer1.', 'layer2.', 'layer3.', 'layer4.'))
+                          and not k.endswith('num_batches_tracked')}
+        checkpoint_keys = {k for k in pretrained_backbone if not k.endswith('num_batches_tracked')}
+        incompatible = sorted(
+            (set(model_backbone) ^ checkpoint_keys)
+            | {k for k in set(model_backbone) & checkpoint_keys
+               if model_backbone[k].shape != pretrained_backbone[k].shape})
+        if incompatible:
+            raise ValueError(f"Pretrained checkpoint is incompatible with the selected backbone: "
+                             f"{', '.join(incompatible[:5])}")
          
         net_dict.update(pretrain_dict)
         model.load_state_dict(net_dict)
