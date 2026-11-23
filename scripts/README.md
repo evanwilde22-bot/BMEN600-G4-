@@ -136,6 +136,26 @@ erasing small tumors when downsampling masks to the model output grid.
 This still does not guarantee that the model resolves small lesions.
 
 Install the updated requirements first (`pip install -r MNet/requirements.txt`).
+For a one-epoch smoke test of all four models, run from the repository root:
+
+```bash
+python scripts/smoke_fusion.py
+```
+
+By default this uses `STS-nifti`, the pretrained
+`MNet/pretrain/resnet_18.pth`, 10 training patients and 3 validation patients
+per model, and CPU. It creates a new run under `fusion-smoke-runs/` and prints
+its location. Preparation and training stop after 25 minutes; if the limit is
+reached, the command fails and the last model may be incomplete. Installation
+is separate and not included in the limit. The limit is a maximum, not a
+target runtime, and smoke-test results are not a measure of model accuracy.
+
+Use `--data-root /path/to/STS-nifti` for another dataset location, `--gpu-id 0`
+for CUDA, or `--help` for other options. The four models are independent; this
+command does not register or fuse their predictions.
+
+### Full training
+
 The following macOS/Linux commands run from the repository root, with the
 virtual environment activated. Set `DATA_ROOT` to the actual STS directory.
 The output folders are separate from the dataset. On Windows, adapt the
