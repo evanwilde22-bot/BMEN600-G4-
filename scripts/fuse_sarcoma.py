@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -110,10 +111,12 @@ def fuse(predictions, shape):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data_root", type=Path, required=True)
-    parser.add_argument("--cases", type=Path, required=True, help="One patient ID per line")
-    parser.add_argument("--output_dir", type=Path, required=True)
-    parser.add_argument("--modalities", nargs="+", choices=list(MODALITIES), required=True)
+    parser.add_argument("--run_dir", type=Path,
+                        help="Training run containing lists/ and models/; supplies default paths")
+    parser.add_argument("--data_root", type=Path)
+    parser.add_argument("--cases", type=Path, help="One patient ID per line")
+    parser.add_argument("--output_dir", type=Path)
+    parser.add_argument("--modalities", nargs="+", choices=list(MODALITIES))
     for name in MODALITIES:
         parser.add_argument(f"--{name}_checkpoint", type=Path)
         parser.add_argument(f"--{name}_weight", type=float, default=1.0)
@@ -131,6 +134,20 @@ def main():
     parser.add_argument("--device", default="cpu", help="PyTorch device, e.g. cpu or cuda:0")
     parser.add_argument("--threshold", type=float, default=0.5)
     args = parser.parse_args()
+    if args.run_dir is not None:
+        if not args.run_dir.is_dir():
+            parser.error(f"training run directory does not exist: {args.run_dir}")
+        args.data_root = args.data_root or MNET_DIR.parent / "STS-nifti"
+        args.cases = args.cases or args.run_dir / "lists" / "test_cases.txt"
+        args.modalities = args.modalities or list(MODALITIES)
+        for name in args.modalities:
+            if getattr(args, f"{name}_checkpoint") is None:
+                setattr(args, f"{name}_checkpoint", args.run_dir / "models" / f"{name}_best.pth.tar")
+    for name in ("data_root", "cases", "modalities"):
+        if getattr(args, name) is None:
+            parser.error(f"--{name} is required without --run_dir")
+    if args.output_dir is None and args.run_dir is None:
+        parser.error("--output_dir is required without --run_dir")
     if len(set(args.modalities)) != len(args.modalities):
         parser.error("modalities must not be repeated")
     if args.reference is None:
@@ -156,6 +173,11 @@ def main():
         parser.error("case list must be nonempty and contain unique patient IDs")
     if any(Path(case_id).name != case_id or not case_id.startswith("STS_") for case_id in case_ids):
         parser.error("case list must contain STS_ patient directory names only")
+
+    if args.output_dir is None:
+        prefix = "registration-" if args.auto_register else "evaluation-"
+        args.output_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=args.run_dir))
+    print(f"Output directory: {args.output_dir}", flush=True)
 
     if args.auto_register:
         transform_dir = args.output_dir / "transforms"

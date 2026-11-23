@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "MNet"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from datasets.sarcoma import SarcomaDataset
+import fuse_sarcoma
 from fuse_sarcoma import fuse, register_images, resample
 from generate_fusion_lists import main as generate_lists
 from model import generate_model
@@ -22,6 +23,39 @@ from train_sarcoma import loss_inputs_at_input_resolution
 
 
 class FusionTests(unittest.TestCase):
+    def test_run_directory_defaults_evaluate_all_models(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "run"
+            (run / "lists").mkdir(parents=True)
+            (run / "lists" / "test_cases.txt").write_text("STS_001\n")
+            data = root / "data"
+            array = np.zeros((8, 8, 8), dtype=np.uint8)
+            array[3:5, 3:5, 3:5] = 1
+            image = sitk.GetImageFromArray(array)
+            for name in ("CT", "T1", "STIR", "PET"):
+                folder = data / "STS_001" / f"RTstruct_{name}"
+                folder.mkdir(parents=True)
+                sitk.WriteImage(image, str(folder / "image.nii.gz"))
+                sitk.WriteImage(image, str(folder / "mask_GTV_Mass.nii.gz"))
+            transforms = root / "transforms"
+            transforms.mkdir()
+            for name in ("t1", "t2", "pet"):
+                sitk.WriteTransform(sitk.Transform(3, sitk.sitkIdentity),
+                                    str(transforms / f"STS_001_ct_to_{name}.tfm"))
+            args = ["fuse_sarcoma", "--run_dir", str(run), "--data_root", str(data),
+                    "--transform_dir", str(transforms), "--evaluate"]
+            probability = sitk.Cast(image, sitk.sitkFloat32)
+            with patch.object(sys, "argv", args), \
+                 patch.object(fuse_sarcoma, "load_model", return_value=None) as load, \
+                 patch.object(fuse_sarcoma, "predict", return_value=(image, probability)):
+                fuse_sarcoma.main()
+            self.assertEqual(load.call_count, 4)
+            evaluation = next(run.glob("evaluation-*"))
+            self.assertTrue((evaluation / "STS_001" / "fused_mask.nii.gz").is_file())
+            import json
+            self.assertEqual(json.loads((evaluation / "run.json").read_text())["dice"]["STS_001"], 1.0)
+
     def test_loss_keeps_small_input_resolution_tumor(self):
         labels = torch.zeros((1, 1, 8, 8, 8))
         labels[0, 0, 3, 3, 3] = 1

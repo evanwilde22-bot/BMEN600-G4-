@@ -154,6 +154,48 @@ Use `--data-root /path/to/STS-nifti` for another dataset location, `--gpu-id 0`
 for CUDA, or `--help` for other options. The four models are independent; this
 command does not register or fuse their predictions.
 
+For adjustable runs from **either** the repository root or `MNet/`, the
+following examples use the repository's absolute macOS path. Replace it if
+the repository is elsewhere:
+
+```bash
+# Short smoke test: two training patients, one validation patient per model.
+"$HOME/Documents/BMEN600-G4-/venv/bin/python" "$HOME/Documents/BMEN600-G4-/scripts/smoke_fusion.py" --train-cases 2 --val-cases 1 --epochs 1 --time-limit 5
+
+# Full split, one epoch per model, with a 30-minute maximum.
+"$HOME/Documents/BMEN600-G4-/venv/bin/python" "$HOME/Documents/BMEN600-G4-/scripts/smoke_fusion.py" --train-cases all --val-cases all --epochs 1 --time-limit 30 --run-dir "$HOME/Documents/BMEN600-G4-/fusion-runs/full-01"
+```
+
+The run directory must not already exist. Change `full-01` for another run.
+`--epochs`, `--train-cases`, `--val-cases`, `--val-interval` and `--time-limit`
+are adjustable; `--train-cases all` uses the full *training split*, not the
+held-out patients. One epoch is a limited full-data run, not a guarantee of
+convergence. A time limit can interrupt any model, leaving later models
+untrained or the current checkpoint incomplete; the command then exits with
+an error. A complete four-model session cannot be guaranteed to fit 30
+minutes on every machine. Installation is not included in the limit.
+
+After training, first generate candidate registrations for the test patients:
+
+```bash
+"$HOME/Documents/BMEN600-G4-/venv/bin/python" "$HOME/Documents/BMEN600-G4-/scripts/fuse_sarcoma.py" --run_dir "$HOME/Documents/BMEN600-G4-/fusion-runs/full-01" --auto_register --output_dir "$HOME/Documents/BMEN600-G4-/fusion-runs/full-01/registration"
+```
+
+Inspect and correct the registrations before evaluating; automatic
+registration is not reliable without review. After verification, evaluate the
+weighted four-model fusion on held-out patients:
+
+```bash
+"$HOME/Documents/BMEN600-G4-/venv/bin/python" "$HOME/Documents/BMEN600-G4-/scripts/fuse_sarcoma.py" --run_dir "$HOME/Documents/BMEN600-G4-/fusion-runs/full-01" --transform_dir "$HOME/Documents/BMEN600-G4-/fusion-runs/full-01/registration/transforms" --evaluate
+```
+
+This prints per-patient and mean Dice and writes a uniquely named evaluation
+directory inside the run directory. `--run_dir` defaults to the run's four
+best checkpoints and its held-out test list; use `--data_root` if the dataset
+is not in the repository's `STS-nifti/`. For native single-modality Dice
+without registration, replace `--transform_dir ...` with `--modalities ct`
+(or `t1`, `t2`, `pet`). Do not use the test set for model or weight selection.
+
 ### Full training
 
 The following macOS/Linux commands run from the repository root, with the
