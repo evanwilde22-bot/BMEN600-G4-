@@ -1,6 +1,7 @@
 """Run independent modality models and fuse their registered probabilities."""
 
 import argparse
+import itertools
 import json
 import sys
 import tempfile
@@ -12,7 +13,7 @@ import numpy as np
 import SimpleITK as sitk
 import torch
 import torch.nn.functional as F
-from scipy import ndimage
+from scipy import ndimage, signal
 
 MNET_DIR = Path(__file__).resolve().parents[1] / "MNet"
 sys.path.insert(0, str(MNET_DIR))
@@ -22,29 +23,160 @@ from model import generate_model
 from generate_fusion_lists import MODALITIES, modality_folder
 
 
-def register_images(fixed, moving):
-    fixed = sitk.Cast(fixed, sitk.sitkFloat32)
-    moving = sitk.Cast(moving, sitk.sitkFloat32)
+def registration_similarity(fixed, moving, transform):
+    warped = sitk.Resample(moving, fixed, transform, sitk.sitkLinear, 0, sitk.sitkFloat32)
+    fixed_array = sitk.GetArrayViewFromImage(fixed)
+    moving_array = sitk.GetArrayViewFromImage(warped)
+    fixed_foreground = fixed_array > 0
+    valid = fixed_foreground & (moving_array > 0)
+    if not fixed_foreground.any() or valid.sum() < 2:
+        raise ValueError("MRI reference images have insufficient nonzero overlap")
+    coverage = float(valid.sum() / fixed_foreground.sum())
+    correlation = float(np.corrcoef(fixed_array[valid], moving_array[valid])[0, 1])
+    if not np.isfinite(correlation):
+        raise ValueError("MRI reference images have insufficient intensity variation")
+    return correlation, coverage
+
+
+def image_bounds(image):
+    corners = np.array([
+        image.TransformContinuousIndexToPhysicalPoint(index)
+        for index in itertools.product(*[(0, size - 1) for size in image.GetSize()])
+    ])
+    return corners.min(axis=0), corners.max(axis=0)
+
+
+def canonical_coarse_image(image, spacing=4.0):
+    lower, upper = image_bounds(image)
+    size = [int(np.ceil((end - start) / spacing)) + 1 for start, end in zip(lower, upper)]
+    return sitk.Resample(image, size, sitk.Transform(3, sitk.sitkIdentity), sitk.sitkLinear,
+                         lower.tolist(), [spacing] * 3, [1, 0, 0, 0, 1, 0, 0, 0, 1],
+                         0, sitk.sitkFloat32)
+
+
+def template_initialization(fixed, moving):
+    fixed_coarse = canonical_coarse_image(fixed)
+    moving_coarse = canonical_coarse_image(moving)
+    template = sitk.GetArrayFromImage(fixed_coarse)
+    image = sitk.GetArrayFromImage(moving_coarse)
+    if any(a > b for a, b in zip(template.shape, image.shape)):
+        raise ValueError("Aligned MRI reference exceeds the native image; manual registration required")
+    mask = (template > 0).astype(np.float32)
+    count = float(mask.sum())
+    if count < 2:
+        raise ValueError("Aligned MRI reference has insufficient nonzero intensities")
+    centered = (template - (template * mask).sum() / count) * mask
+    reverse = (slice(None, None, -1),) * 3
+    numerator = signal.fftconvolve(image, centered[reverse], mode="valid")
+    local_sum = signal.fftconvolve(image, mask[reverse], mode="valid")
+    local_squared_sum = signal.fftconvolve(image * image, mask[reverse], mode="valid")
+    variance = np.maximum(local_squared_sum - local_sum * local_sum / count, 0)
+    denominator = np.sqrt((centered * centered).sum() * variance)
+    coverage = signal.fftconvolve((image > 0).astype(np.float32), mask[reverse], mode="valid") / count
+    valid = (denominator > 1e-4) & (coverage >= 0.9)
+    if not valid.any():
+        raise ValueError("No adequately covered native MRI region matches the aligned reference")
+    scores = np.full_like(numerator, -np.inf)
+    np.divide(numerator, denominator, out=scores, where=valid)
+    z, y, x = np.unravel_index(np.argmax(scores), scores.shape)
+    moving_center = moving_coarse.TransformContinuousIndexToPhysicalPoint(
+        (float(x + (template.shape[2] - 1) / 2),
+         float(y + (template.shape[1] - 1) / 2),
+         float(z + (template.shape[0] - 1) / 2)))
+    fixed_center = fixed_coarse.TransformContinuousIndexToPhysicalPoint(
+        [(size - 1) / 2 for size in fixed_coarse.GetSize()])
+    initial = sitk.Euler3DTransform()
+    initial.SetCenter(fixed_center)
+    initial.SetTranslation((np.array(moving_center) - np.array(fixed_center)).tolist())
+    print(f"Coarse image template correlation: {scores[z, y, x]:.4f}", flush=True)
+    return initial
+
+
+def optimize_mri_registration(fixed, moving, metric, initial):
     registration = sitk.ImageRegistrationMethod()
-    registration.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
+    if metric == "correlation":
+        registration.SetMetricAsCorrelation()
+    else:
+        registration.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
+        registration.SetMetricFixedMask(sitk.Cast(fixed > 0, sitk.sitkUInt8))
+        registration.SetMetricMovingMask(sitk.Cast(moving > 0, sitk.sitkUInt8))
     registration.SetMetricSamplingStrategy(registration.RANDOM)
-    registration.SetMetricSamplingPercentage(0.1, seed=1)
+    registration.SetMetricSamplingPercentage(0.4, seed=23)
     registration.SetInterpolator(sitk.sitkLinear)
-    registration.SetOptimizerAsGradientDescent(
-        learningRate=1.0, numberOfIterations=200,
-        convergenceMinimumValue=1e-6, convergenceWindowSize=10)
+    registration.SetOptimizerAsRegularStepGradientDescent(
+        learningRate=2.0, minStep=0.001, numberOfIterations=300,
+        relaxationFactor=0.5, gradientMagnitudeTolerance=1e-6)
     registration.SetOptimizerScalesFromPhysicalShift()
     registration.SetShrinkFactorsPerLevel([4, 2, 1])
     registration.SetSmoothingSigmasPerLevel([2, 1, 0])
     registration.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
-    initial = sitk.CenteredTransformInitializer(
-        fixed, moving, sitk.Euler3DTransform(),
-        sitk.CenteredTransformInitializerFilter.GEOMETRY)
     registration.SetInitialTransform(initial, inPlace=False)
-    transform = registration.Execute(fixed, moving)
-    print(f"Registration metric: {registration.GetMetricValue():.6g}; "
-          f"{registration.GetOptimizerStopConditionDescription()}")
+    return registration.Execute(fixed, moving)
+
+
+def register_images(fixed, moving):
+    """Recover a PET-space-to-native MRI transform from two copies of the same MRI."""
+    fixed = sitk.Cast(fixed, sitk.sitkFloat32)
+    moving = sitk.Cast(moving, sitk.sitkFloat32)
+    candidates = []
+    for metric in ("correlation", "masked mutual information"):
+        initial = sitk.CenteredTransformInitializer(
+            fixed, moving, sitk.Euler3DTransform(),
+            sitk.CenteredTransformInitializerFilter.GEOMETRY)
+        try:
+            transform = optimize_mri_registration(fixed, moving, metric, initial)
+            correlation, coverage = registration_similarity(fixed, moving, transform)
+        except (RuntimeError, ValueError) as exc:
+            print(f"{metric} registration failed: {exc}", file=sys.stderr, flush=True)
+            continue
+        print(f"{metric}: image correlation {correlation:.4f}, coverage {coverage:.4f}", flush=True)
+        if correlation >= 0.95 and coverage >= 0.9:
+            candidates.append((correlation, transform))
+    if not candidates:
+        initial = template_initialization(fixed, moving)
+        transform = optimize_mri_registration(fixed, moving, "correlation", initial)
+        correlation, coverage = registration_similarity(fixed, moving, transform)
+        print(f"Template refinement: image correlation {correlation:.4f}, coverage {coverage:.4f}",
+              flush=True)
+        if correlation < 0.95 or coverage < 0.9:
+            raise ValueError("MRI transform recovery failed its image similarity check; "
+                             "register manually and visually verify the transform")
+        candidates.append((correlation, transform))
+    return max(candidates, key=lambda candidate: candidate[0])[1]
+
+
+def aligned_mri_path(case, native_folder):
+    names = {
+        "RTstruct_T1": ("RTstruct_AlignedT1toPET", "RTstruct_AlignedT1toPET_BOX"),
+        "RTstruct_T2FS": ("RTstruct_AlignedT2FStoPET", "RTstruct_AlignedT2FStoPET_BOX"),
+        "RTstruct_STIR": ("RTstruct_AlignedSTIRtoPET", "RTstruct_AlignedSTIRtoPET_BOX"),
+    }
+    matches = [case / name / "image.nii.gz" for name in names[native_folder.name]
+               if (case / name / "image.nii.gz").is_file()]
+    if len(matches) != 1:
+        raise ValueError(f"{case.name}: expected one PET-aligned reference for "
+                         f"{native_folder.name}, found {len(matches)}; provide a "
+                         "manually verified transform")
+    return matches[0]
+
+
+def relative_transform(common_to_reference, common_to_moving):
+    transform = sitk.CompositeTransform(3)
+    transform.AddTransform(common_to_moving)
+    transform.AddTransform(common_to_reference.GetInverse())
+    transform.FlattenTransform()
     return transform
+
+
+def check_ct_pet_geometry(ct, pet):
+    if not np.allclose(ct.GetDirection(), pet.GetDirection(), atol=1e-4):
+        raise ValueError("CT/PET directions differ; provide a manually verified transform")
+    if abs(ct.GetOrigin()[2] - pet.GetOrigin()[2]) > max(ct.GetSpacing()[2], pet.GetSpacing()[2]):
+        raise ValueError("CT/PET axial origins differ; provide a manually verified transform")
+    centers = [np.array(image.TransformContinuousIndexToPhysicalPoint(
+        [(size - 1) / 2 for size in image.GetSize()])) for image in (ct, pet)]
+    if np.linalg.norm((centers[0] - centers[1])[:2]) > 3:
+        raise ValueError("CT/PET in-plane centers differ; provide a manually verified transform")
 
 
 def resample(image, reference, transform, interpolator, default=0.0):
@@ -125,7 +257,7 @@ def main():
     parser.add_argument("--transform_dir", type=Path,
                         help="Directory of fixed-to-moving SimpleITK .tfm transforms")
     parser.add_argument("--auto_register", action="store_true",
-                        help="Prepare candidate transforms and registered images for inspection; do not fuse")
+                        help="Recover candidate transforms using PET-aligned MRI copies for inspection; do not fuse")
     parser.add_argument("--evaluate", action="store_true")
     parser.add_argument("--mask", default="mask_GTV_Mass.nii.gz")
     parser.add_argument("--input_size", type=int, nargs=3, default=(32, 160, 160))
@@ -189,17 +321,45 @@ def main():
             if missing:
                 raise FileNotFoundError(f"{case_id}: missing images for {', '.join(missing)}")
             case_out = args.output_dir / case_id
-            case_out.mkdir(parents=True, exist_ok=True)
-            reference = sitk.ReadImage(str(folders[args.reference] / "image.nii.gz"))
+            if case_out.exists():
+                raise FileExistsError(f"Registration output already exists: {case_out}")
+            images = {name: sitk.ReadImage(str(folder / "image.nii.gz"))
+                      for name, folder in folders.items()}
+            if "ct" in images and "pet" in images:
+                check_ct_pet_geometry(images["ct"], images["pet"])
+            if "ct" in images or "pet" in images:
+                print(f"{case_id}: CT/PET identity assumes the paired STS acquisition; "
+                      "visually inspect the result.", flush=True)
+            common_to_native = {}
+            common_image = images.get("ct", images.get("pet"))
+            for name in args.modalities:
+                if name in ("ct", "pet"):
+                    common_to_native[name] = sitk.Transform(3, sitk.sitkIdentity)
+                else:
+                    aligned_path = aligned_mri_path(case, folders[name])
+                    print(f"{case_id}: recovering {name} transform using {aligned_path}", flush=True)
+                    aligned = sitk.ReadImage(str(aligned_path))
+                    if common_image is not None:
+                        ref_min, ref_max = image_bounds(common_image)
+                        aligned_min, aligned_max = image_bounds(aligned)
+                        if np.any(np.minimum(ref_max, aligned_max) <= np.maximum(ref_min, aligned_min)):
+                            raise ValueError(f"{case_id}: {aligned_path} does not overlap the "
+                                             "common PET/CT space; manually verify registration")
+                    else:
+                        common_image = aligned
+                    common_to_native[name] = register_images(aligned, images[name])
+            reference = images[args.reference]
+            case_out.mkdir(parents=True)
             sitk.WriteImage(reference, str(case_out / f"{args.reference}_reference.nii.gz"))
             for name in args.modalities:
                 if name == args.reference:
                     continue
-                image = sitk.ReadImage(str(folders[name] / "image.nii.gz"))
-                print(f"{case_id}: registering {name} to {args.reference}")
-                transform = register_images(reference, image)
-                sitk.WriteTransform(transform, str(transform_dir / f"{case_id}_{args.reference}_to_{name}.tfm"))
-                aligned = resample(image, reference, transform, sitk.sitkLinear)
+                transform = relative_transform(common_to_native[args.reference], common_to_native[name])
+                transform_path = transform_dir / f"{case_id}_{args.reference}_to_{name}.tfm"
+                if transform_path.exists():
+                    raise FileExistsError(f"Registration transform already exists: {transform_path}")
+                sitk.WriteTransform(transform, str(transform_path))
+                aligned = resample(images[name], reference, transform, sitk.sitkLinear)
                 sitk.WriteImage(aligned, str(case_out / f"{name}_registered.nii.gz"))
         print(f"Candidate transforms saved to {transform_dir}. Inspect every registration before fusion.")
         return

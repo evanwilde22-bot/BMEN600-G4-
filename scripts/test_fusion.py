@@ -16,7 +16,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from datasets.sarcoma import SarcomaDataset
 import fuse_sarcoma
-from fuse_sarcoma import fuse, register_images, resample
+from fuse_sarcoma import (
+    aligned_mri_path, check_ct_pet_geometry, fuse, register_images,
+    registration_similarity, relative_transform, resample, template_initialization,
+)
 from generate_fusion_lists import main as generate_lists
 from model import generate_model
 from train_sarcoma import loss_inputs_at_input_resolution
@@ -87,6 +90,61 @@ class FusionTests(unittest.TestCase):
         moving = sitk.GetImageFromArray(data.astype(np.float32))
         result = register_images(fixed, moving)
         self.assertEqual(result.GetDimension(), 3)
+
+    def test_registration_relative_transform_direction(self):
+        common_to_reference = sitk.TranslationTransform(3, (5, 0, 0))
+        common_to_moving = sitk.TranslationTransform(3, (2, 0, 0))
+        result = relative_transform(common_to_reference, common_to_moving)
+        self.assertEqual(result.TransformPoint((5, 0, 0)), (2, 0, 0))
+
+    def test_template_initialization_recovers_cropped_region(self):
+        rng = np.random.default_rng(42)
+        moving = sitk.GetImageFromArray(rng.uniform(1, 100, size=(32, 32, 32)).astype(np.float32))
+        fixed = sitk.RegionOfInterest(moving, [13, 13, 13], [8, 8, 8])
+        fixed.SetOrigin(tuple(value + delta for value, delta in zip(fixed.GetOrigin(), (100, 20, -40))))
+        transform = template_initialization(fixed, moving)
+        correlation, coverage = registration_similarity(fixed, moving, transform)
+        self.assertAlmostEqual(correlation, 1.0, places=5)
+        self.assertEqual(coverage, 1.0)
+
+    def test_registration_uses_template_when_center_initialization_fails(self):
+        image = sitk.GetImageFromArray(np.ones((8, 8, 8), dtype=np.float32))
+        transform = sitk.Euler3DTransform()
+        with patch.object(fuse_sarcoma, "optimize_mri_registration", return_value=transform), \
+             patch.object(fuse_sarcoma, "template_initialization", return_value=transform) as coarse, \
+             patch.object(fuse_sarcoma, "registration_similarity",
+                          side_effect=[(0.1, 1.0), (0.2, 1.0), (0.99, 1.0)]):
+            self.assertEqual(register_images(image, image), transform)
+            coarse.assert_called_once()
+
+    def test_registration_rejects_low_similarity_after_template_refinement(self):
+        image = sitk.GetImageFromArray(np.ones((8, 8, 8), dtype=np.float32))
+        transform = sitk.Euler3DTransform()
+        with patch.object(fuse_sarcoma, "optimize_mri_registration", return_value=transform), \
+             patch.object(fuse_sarcoma, "template_initialization", return_value=transform), \
+             patch.object(fuse_sarcoma, "registration_similarity", return_value=(0.2, 1.0)):
+            with self.assertRaisesRegex(ValueError, "similarity"):
+                register_images(image, image)
+
+    def test_aligned_reference_accepts_box_and_rejects_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            case = Path(tmp)
+            native = case / "RTstruct_T1"
+            native.mkdir()
+            with self.assertRaises(ValueError):
+                aligned_mri_path(case, native)
+            box = case / "RTstruct_AlignedT1toPET_BOX"
+            box.mkdir()
+            (box / "image.nii.gz").touch()
+            self.assertEqual(aligned_mri_path(case, native), box / "image.nii.gz")
+
+    def test_ct_pet_geometry_rejects_different_orientation(self):
+        ct = sitk.Image([8, 8, 8], sitk.sitkFloat32)
+        pet = sitk.Image(ct)
+        check_ct_pet_geometry(ct, pet)
+        pet.SetDirection((-1, 0, 0, 0, 1, 0, 0, 0, 1))
+        with self.assertRaises(ValueError):
+            check_ct_pet_geometry(ct, pet)
 
     def test_training_and_inference_use_same_volume_preprocessing(self):
         with tempfile.TemporaryDirectory() as tmp:

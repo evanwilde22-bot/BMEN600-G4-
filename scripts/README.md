@@ -123,9 +123,11 @@ python ..\scripts\train_sarcoma.py --gpu_id 0 --model_depth 18 --resnet_shortcut
 
 This experimental workflow trains four **separate** single-channel 3D models:
 CT, T1, T2FS/STIR and PET. It combines their foreground probability maps,
-not the input scans, with a weighted average. It uses only native modalities,
-not the `RTstruct_Aligned*` images. T2FS and STIR share one model; the
-generator rejects cases containing both rather than silently choosing one.
+not the input scans, with a weighted average. Models use native modalities;
+automatic transform recovery uses the dataset's `RTstruct_Aligned*` MRI
+copies as registration references only, never as model inputs. T2FS and STIR
+share one model; the generator rejects cases containing both rather than
+silently choosing one.
 
 The split is by patient and requires all four images and their mass masks.
 With the current local collection, 50 complete patients yield 30 training,
@@ -240,7 +242,8 @@ image, named `<case>_<reference>_to_<moving>.tfm`, e.g.
 required by SimpleITK resampling. Use `--transform_dir` to supply these files.
 
 Alternatively, the following prepares *candidate* rigid mutual-information
-transforms and registered images; it does not run inference or evaluation:
+and correlation transforms and registered images; it does not run inference
+or evaluation:
 
 ```bash
 python scripts/fuse_sarcoma.py \
@@ -249,13 +252,26 @@ python scripts/fuse_sarcoma.py \
   --modalities ct t1 t2 pet --reference ct --auto_register
 ```
 
-Registration is not guaranteed to align different fields of view or patient
-positions. **Inspect every registered image against the reference**, correct
-failed registrations with suitable tools, and save the verified transforms
-before fusion. There is no automatic quality validation. In one local
-MRI/PET case, automatic registration converged but the masks did not overlap;
-convergence is not evidence of correct alignment. Do not use tumor masks to
-derive registration transforms.
+For this STS collection, paired CT and PET share a physical coordinate system
+and are not re-optimized. For MRI, each aligned MRI copy is compared to its
+native scan to recover a transform from PET space to native MRI space; the
+aligned image is not fed into a model. Recovery checks image correlation and
+coverage and stops if they are too low. Cases missing the required aligned MRI
+copy also stop and require manual transforms. The CT/PET assumption and
+similarity checks are not a guarantee of correct alignment.
+The supplied MRI references may be cropped around the lesion, so using them
+for registration can reveal approximate lesion location and bias evaluation.
+This workflow also requires those reference images at inference and is not
+validated for native scans alone. Use a separate untouched external cohort
+for final assessment after registration development.
+
+**Inspect every registered image against the reference**, correct failed
+registrations with suitable tools, and save verified transforms before fusion.
+Different limb positions can leave anatomy misaligned outside the MRI reference
+crop even when image-similarity checks pass; a single rigid transform cannot
+correct those differences. Review multiple planes and the region being fused.
+Use a new output directory; existing case outputs are not overwritten. Do not
+use tumor masks to derive registration transforms.
 
 For example, after training, this runs equal-weight four-modality inference
 in CT space on the held-out test patients:
