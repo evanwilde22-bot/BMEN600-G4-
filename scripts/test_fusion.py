@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from datasets.sarcoma import SarcomaDataset
 import fuse_sarcoma
+import train_sarcoma
 from fuse_sarcoma import (
     aligned_mri_path, check_ct_pet_geometry, fuse, register_images,
     registration_similarity, relative_transform, resample, template_initialization,
@@ -26,6 +27,85 @@ from train_sarcoma import loss_inputs_at_input_resolution
 
 
 class FusionTests(unittest.TestCase):
+    def test_resume_matches_uninterrupted_schedule_and_preserves_best(self):
+        settings = SimpleNamespace(consistent_preprocessing=True, input_D=2, input_H=2,
+                                   input_W=2, model_depth=18, resnet_shortcut="A",
+                                   modality_name="t2", no_cuda=True, ci_test=False,
+                                   val_img_list="validation", val_interval=1)
+        data = [(torch.ones((1, 1, 2, 2, 2)), torch.zeros((1, 1, 2, 2, 2)))]
+
+        def setup():
+            torch.manual_seed(1)
+            model = torch.nn.Conv3d(1, 2, 1)
+            optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
+            return model, optimizer, scheduler
+
+        def run(prefix, epochs, model, optimizer, scheduler, scores, **kwargs):
+            with patch.object(train_sarcoma, "run_validation", side_effect=scores):
+                train_sarcoma.train(data, model, optimizer, scheduler, epochs, 10,
+                                    str(prefix), settings, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            full = setup()
+            run(root / "full", 4, *full, [0.8, 0.6, 0.5, 0.4])
+            first = setup()
+            run(root / "first", 2, *first, [0.8, 0.6])
+            resumed = setup()
+            start, best, best_epoch = train_sarcoma.restore_training_checkpoint(
+                root / "first_epoch_1_final.pth.tar", *resumed, str(root / "continued"), 4, True)
+            self.assertEqual((start, best, best_epoch), (2, 0.8, 0))
+            run(root / "continued", 4, *resumed, [0.5, 0.4],
+                start_epoch=start, best_val_dice=best, best_epoch=best_epoch)
+            for expected, actual in zip(full[0].parameters(), resumed[0].parameters()):
+                torch.testing.assert_close(expected, actual)
+            self.assertEqual(full[1].param_groups[0]['lr'], resumed[1].param_groups[0]['lr'])
+            self.assertEqual(full[2].state_dict(), resumed[2].state_dict())
+            best_checkpoint = torch.load(root / "continued_best.pth.tar", weights_only=True)
+            self.assertEqual((best_checkpoint['epoch'], best_checkpoint['val_dice']), (0, 0.8))
+
+            restored_best = setup()
+            state = train_sarcoma.restore_training_checkpoint(
+                root / "first_best.pth.tar", *restored_best, str(root / "from-best"), 4, True,
+                train_sarcoma.preprocessing_settings(settings))
+            self.assertEqual(state, (1, 0.8, 0))
+            with self.assertRaisesRegex(ValueError, "preprocessing or modality"):
+                train_sarcoma.restore_training_checkpoint(
+                    root / "first_best.pth.tar", *setup(), str(root / "wrong"), 4, True,
+                    {"modality": "ct"})
+
+            legacy = torch.load(root / "first_epoch_1_final.pth.tar", weights_only=True)
+            legacy.pop('scheduler')
+            legacy.pop('best_epoch')
+            legacy.pop('best_val_dice')
+            torch.save(legacy, root / "first_epoch_1_final.pth.tar")
+            restored = setup()
+            start, best, best_epoch = train_sarcoma.restore_training_checkpoint(
+                root / "first_epoch_1_final.pth.tar", *restored, str(root / "legacy"), 4, True)
+            self.assertEqual((start, best, best_epoch), (2, 0.8, 0))
+            run(root / "legacy", 4, *restored, [0.5, 0.4],
+                start_epoch=start, best_val_dice=best, best_epoch=best_epoch)
+            for expected, actual in zip(full[0].parameters(), restored[0].parameters()):
+                torch.testing.assert_close(expected, actual)
+            self.assertEqual(full[1].param_groups[0]['lr'], restored[1].param_groups[0]['lr'])
+
+    def test_resume_rejects_mid_epoch_and_existing_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkpoint = root / "mid.pth.tar"
+            torch.save({'epoch': 1, 'batch_id': 0}, checkpoint)
+            model = torch.nn.Conv3d(1, 2, 1)
+            optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
+            with self.assertRaisesRegex(ValueError, "Mid-epoch"):
+                train_sarcoma.restore_training_checkpoint(
+                    checkpoint, model, optimizer, scheduler, str(root / "new"), 4, True)
+            (root / "existing_best.pth.tar").touch()
+            with self.assertRaisesRegex(FileExistsError, "already has checkpoints"):
+                train_sarcoma.restore_training_checkpoint(
+                    checkpoint, model, optimizer, scheduler, str(root / "existing"), 4, True)
+
     def test_run_directory_defaults_evaluate_all_models(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -35,7 +35,10 @@ Run from the MNet directory so relative imports resolve, e.g.:
         --val_img_list "C:\\path\\to\\nifti\\val.txt"
 '''
 
+import glob
 import os
+import re
+import shutil
 import sys
 import time
 
@@ -149,16 +152,78 @@ def run_validation(model, sets, val_img_list):
     return float(np.mean(dices)) if dices else 0.0
 
 
-def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval, save_folder, sets):
-    batches_per_epoch = len(data_loader)
-    log.info('{} epochs in total, {} batches per epoch'.format(total_epochs, batches_per_epoch))
-    preprocessing = {
+def preprocessing_settings(sets):
+    return {
         'consistent': sets.consistent_preprocessing,
         'input_size': [sets.input_D, sets.input_H, sets.input_W],
         'model_depth': sets.model_depth,
         'resnet_shortcut': sets.resnet_shortcut,
         'modality': sets.modality_name,
     }
+
+
+def restore_training_checkpoint(path, model, optimizer, scheduler, save_folder, total_epochs, validate,
+                                expected_preprocessing=None):
+    if glob.glob(glob.escape(save_folder) + '_*.pth.tar'):
+        raise FileExistsError(f"Resume output prefix already has checkpoints: {save_folder}")
+    checkpoint = torch.load(path, map_location='cpu', weights_only=True)
+    if 'batch_id' in checkpoint:
+        raise ValueError("Mid-epoch checkpoints cannot be resumed; use an epoch-final or best checkpoint")
+    if expected_preprocessing is not None and checkpoint.get('preprocessing') != expected_preprocessing:
+        raise ValueError("Checkpoint preprocessing or modality does not match the requested training settings")
+    epoch = checkpoint['epoch']
+    if not isinstance(epoch, int) or epoch < 0:
+        raise ValueError("Checkpoint has an invalid epoch")
+    start_epoch = epoch + 1
+    if total_epochs <= start_epoch:
+        raise ValueError(f"--n_epochs must exceed {start_epoch} when resuming this checkpoint")
+    model.load_state_dict(checkpoint['state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+    if 'scheduler' in checkpoint:
+        scheduler.load_state_dict(checkpoint['scheduler'])
+    else:
+        state = scheduler.state_dict()
+        state.update(last_epoch=start_epoch, _step_count=start_epoch + 1,
+                     _last_lr=[group['lr'] for group in optimizer.param_groups])
+        scheduler.load_state_dict(state)
+        print("Legacy checkpoint: restored exponential scheduler position from completed epoch "
+              "and saved optimizer learning rates.")
+
+    best_val_dice, best_epoch = -1.0, -1
+    if validate:
+        source_best = None
+        if 'val_dice' in checkpoint:
+            source_best = path
+            best_val_dice, best_epoch = checkpoint['val_dice'], epoch
+        else:
+            match = re.fullmatch(r'(.+)_epoch_\d+_final\.pth\.tar', str(path))
+            sibling = match.group(1) + '_best.pth.tar' if match else None
+            if sibling and os.path.isfile(sibling):
+                best_checkpoint = torch.load(sibling, map_location='cpu', weights_only=True)
+                if (best_checkpoint['epoch'] <= epoch
+                        and best_checkpoint.get('preprocessing') == checkpoint.get('preprocessing')):
+                    source_best = sibling
+                    best_val_dice = best_checkpoint['val_dice']
+                    best_epoch = best_checkpoint['epoch']
+            if 'best_epoch' in checkpoint and checkpoint['best_epoch'] >= 0:
+                if (best_epoch != checkpoint['best_epoch']
+                        or best_val_dice != checkpoint['best_val_dice']):
+                    raise ValueError("Matching prior best checkpoint is missing or inconsistent")
+        if source_best:
+            os.makedirs(os.path.dirname(os.path.abspath(save_folder)), exist_ok=True)
+            shutil.copyfile(source_best, save_folder + '_best.pth.tar')
+        else:
+            print("Warning: prior best validation checkpoint unavailable; "
+                  "best selection will start with the resumed epochs.", file=sys.stderr)
+    print(f"=> resumed checkpoint '{path}' after epoch {epoch}; next epoch {start_epoch}")
+    return start_epoch, best_val_dice, best_epoch
+
+
+def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval, save_folder, sets,
+          start_epoch=0, best_val_dice=-1.0, best_epoch=-1):
+    batches_per_epoch = len(data_loader)
+    log.info('{} epochs in total, {} batches per epoch'.format(total_epochs, batches_per_epoch))
+    preprocessing = preprocessing_settings(sets)
     class_weights = torch.tensor([1.0, FOREGROUND_CE_WEIGHT])
     loss_seg = nn.CrossEntropyLoss(weight=class_weights, ignore_index=-1)
 
@@ -168,12 +233,11 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
     if not sets.no_cuda:
         loss_seg = loss_seg.cuda()
 
-    best_val_dice = -1.0
-    best_epoch = -1
-
+    model_save_dir = os.path.dirname(os.path.abspath(save_folder))
+    os.makedirs(model_save_dir, exist_ok=True)
     model.train()
     train_time_sp = time.time()
-    for epoch in range(total_epochs):
+    for epoch in range(start_epoch, total_epochs):
         log.info('Start epoch {}'.format(epoch))
         log.info('lr = {}'.format(scheduler.get_last_lr()))
 
@@ -228,7 +292,8 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
                         'batch_id': batch_id,
                         'preprocessing': preprocessing,
                         'state_dict': model.state_dict(),
-                        'optimizer': optimizer.state_dict()},
+                        'optimizer': optimizer.state_dict(),
+                        'scheduler': scheduler.state_dict()},
                         model_save_path)
 
         # scheduler steps once per epoch (not once per batch) so a
@@ -236,19 +301,6 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
         # batch. Stepping per-batch was causing lr to collapse to ~0
         # after only a handful of epochs, effectively freezing training.
         scheduler.step()
-
-        # always save a checkpoint at the end of each epoch so a full run
-        # is never lost if save_interval doesn't line up with batches_per_epoch
-        model_save_path = '{}_epoch_{}_final.pth.tar'.format(save_folder, epoch)
-        model_save_dir = os.path.dirname(model_save_path)
-        if not os.path.exists(model_save_dir):
-            os.makedirs(model_save_dir)
-        torch.save({
-            'epoch': epoch,
-            'preprocessing': preprocessing,
-            'state_dict': model.state_dict(),
-            'optimizer': optimizer.state_dict()},
-            model_save_path)
 
         # optional in-training validation: evaluate Dice periodically (and
         # always on the last epoch) and track/save the best checkpoint, so
@@ -268,10 +320,25 @@ def train(data_loader, model, optimizer, scheduler, total_epochs, save_interval,
                     'val_dice': val_dice,
                     'preprocessing': preprocessing,
                     'state_dict': model.state_dict(),
-                    'optimizer': optimizer.state_dict()},
+                    'optimizer': optimizer.state_dict(),
+                    'scheduler': scheduler.state_dict()},
                     best_save_path)
                 log.info('New best checkpoint: epoch {}, val Dice {:.4f} -> {}'
                           .format(epoch, val_dice, best_save_path))
+
+        model_save_path = '{}_epoch_{}_final.pth.tar'.format(save_folder, epoch)
+        model_save_dir = os.path.dirname(model_save_path)
+        if model_save_dir:
+            os.makedirs(model_save_dir, exist_ok=True)
+        torch.save({
+            'epoch': epoch,
+            'best_val_dice': best_val_dice,
+            'best_epoch': best_epoch,
+            'preprocessing': preprocessing,
+            'state_dict': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'scheduler': scheduler.state_dict()},
+            model_save_path)
 
     if sets.val_img_list:
         print('Best validation Dice: {:.4f} at epoch {} (saved to {}_best.pth.tar)'
@@ -300,13 +367,11 @@ if __name__ == '__main__':
     optimizer = torch.optim.SGD(params, momentum=0.9, weight_decay=1e-3)
     scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
 
+    start_epoch, best_val_dice, best_epoch = 0, -1.0, -1
     if sets.resume_path:
-        if os.path.isfile(sets.resume_path):
-            print("=> loading checkpoint '{}'".format(sets.resume_path))
-            checkpoint = torch.load(sets.resume_path)
-            model.load_state_dict(checkpoint['state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            print("=> loaded checkpoint '{}' (epoch {})".format(sets.resume_path, checkpoint['epoch']))
+        start_epoch, best_val_dice, best_epoch = restore_training_checkpoint(
+            sets.resume_path, model, optimizer, scheduler, sets.save_folder,
+            sets.n_epochs, bool(sets.val_img_list), preprocessing_settings(sets))
 
     sets.phase = 'train'
     if sets.no_cuda:
@@ -318,4 +383,5 @@ if __name__ == '__main__':
                               num_workers=sets.num_workers, pin_memory=sets.pin_memory)
 
     train(data_loader, model, optimizer, scheduler, total_epochs=sets.n_epochs,
-          save_interval=sets.save_intervals, save_folder=sets.save_folder, sets=sets)
+          save_interval=sets.save_intervals, save_folder=sets.save_folder, sets=sets,
+          start_epoch=start_epoch, best_val_dice=best_val_dice, best_epoch=best_epoch)

@@ -233,6 +233,29 @@ Use validation patients to choose checkpoints and fusion weights. Do not tune
 on the test patients. These new models must be trained before fusion; older
 checkpoints do not contain the required preprocessing and modality metadata.
 
+#### Resuming a modality model
+
+Resume an epoch-final or best checkpoint with `train_sarcoma.py` (the
+four-model `smoke_fusion.py` runner does not resume). Use the same modality,
+architecture, preprocessing, optimizer parameter groups, training list and
+validation list, and a **new** output prefix so the earlier run is preserved.
+`--n_epochs` is the total target, not the number of additional epochs.
+For example, to continue T2 from the end of `full-02` through 40 total
+epochs, from either the repository root or `MNet/`:
+
+```bash
+"$HOME/Documents/BMEN600-G4-/venv/bin/python" "$HOME/Documents/BMEN600-G4-/scripts/train_sarcoma.py" --no_cuda --model_depth 18 --resnet_shortcut A --input_D 32 --input_H 160 --input_W 160 --batch_size 1 --num_workers 0 --n_epochs 40 --val_interval 1 --dropout_prob 0.2 --pretrain_path "$HOME/Documents/BMEN600-G4-/MNet/pretrain/resnet_18.pth" --consistent_preprocessing --modality_name t2 --data_root "$HOME/Documents/BMEN600-G4-/STS-nifti" --img_list "$HOME/Documents/BMEN600-G4-/fusion-runs/full-02/lists/smoke_train_t2.txt" --val_img_list "$HOME/Documents/BMEN600-G4-/fusion-runs/full-02/lists/smoke_val_t2.txt" --resume_path "$HOME/Documents/BMEN600-G4-/fusion-runs/full-02/models/t2_epoch_29_final.pth.tar" --output_prefix "$HOME/Documents/BMEN600-G4-/fusion-runs/t2-continued/models/t2"
+```
+
+The optimizer and scheduler resume from the checkpoint. Older epoch-end
+checkpoints without scheduler state restore the exponential schedule from
+the saved learning rates and completed epoch. When available, the original
+best checkpoint beside the resumed checkpoint is copied and retained unless
+validation improves; keep these files together. If no earlier best is
+available, a warning says that best selection starts with resumed epochs.
+Mid-epoch checkpoints are not supported. Random generator and data-loader
+states are not restored, so continuation is not bit-for-bit reproducible.
+
 For each test patient, align the native images without using tumor masks, then
 resample predictions into the chosen reference image's grid. The preferred
 input is a **visually verified** SimpleITK `.tfm` transform for each moving
