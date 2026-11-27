@@ -119,6 +119,48 @@ python ..\scripts\train_sarcoma.py --gpu_id 0 --model_depth 18 --resnet_shortcut
 
 `--dropout_prob 0.2` counters overfitting on the small STS dataset, and a lower `--val_interval` gives best-checkpoint tracking more samples in short resumed runs (at the cost of extra evaluation time).
 
+## Experimental T2 patch model
+
+This separate T2FS/STIR experiment retains the same `full-02` patient split
+for comparison. Images are reoriented to RAS and resampled to 1.5 x 1.5 x
+7 mm. Training samples patches centered on tumor voxels and image voxels;
+inference uses overlapping patches across the entire image without the
+reference mask. Patches are averaged before predictions are returned to the
+original image grid. This approach is experimental and does not guarantee
+better Dice or eliminate boundary artifacts.
+
+The command runs on CPU and has no hard time limit. It uses MedicalNet's
+pretrained ResNet-18 backbone, not the previous T2 checkpoint, because the
+preprocessing and training task have changed. The default split requires the
+lists from `full-02`; use `--lists` to supply another directory containing
+`train_t2.txt`, `val_t2.txt`, and `test_t2.txt`. Patients must not overlap.
+Each run snapshots those lists and requires a new output directory. It saves
+only the latest and best checkpoints, so it uses much less disk than saving
+every epoch. The latest checkpoint is saved for recovery, but automatic resume
+is not implemented for this experimental runner.
+
+From the repository root or `MNet/`:
+
+```bash
+"$HOME/Documents/BMEN600-G4-/venv/bin/python" "$HOME/Documents/BMEN600-G4-/scripts/t2_patches.py" --run-dir "$HOME/Documents/BMEN600-G4-/fusion-runs/t2-patches-01" --epochs 30 --patches-per-case 2 --val-interval 5
+```
+
+Validation uses the full image and native reference grid every five epochs
+and on the last epoch. It takes significantly longer than training one patch;
+actual runtime depends on image sizes and hardware. To create native-grid
+validation masks for visual inspection:
+
+```bash
+"$HOME/Documents/BMEN600-G4-/venv/bin/python" "$HOME/Documents/BMEN600-G4-/scripts/t2_patches.py" --run-dir "$HOME/Documents/BMEN600-G4-/fusion-runs/t2-patches-01" --evaluate val
+```
+
+The command prints the output directory and per-patient Dice. Each case
+contains `t2_mask.nii.gz` and `t2_probability.nii.gz`. Use `--evaluate test`
+only after making modeling choices on the validation cohort. The original
+test cases were inspected during registration development; use an untouched
+external cohort for final assessment. `--data-root` can override the
+recorded data location if the dataset is moved.
+
 ## Late fusion of four native modalities
 
 This experimental workflow trains four **separate** single-channel 3D models:
