@@ -161,6 +161,44 @@ test cases were inspected during registration development; use an untouched
 external cohort for final assessment. `--data-root` can override the
 recorded data location if the dataset is moved.
 
+### Refined T2 experiment
+
+`--refined` selects a new skip-connected decoder, percentile-clipped MRI
+normalization, expanded intensity augmentation, and weighted overlap
+blending. Training draws tumor, nearby boundary-background, and bright
+non-tumor patch centers; patches centered outside the tumor can still
+contain part of it. Labels are never used to locate the tumor during
+inference. The refined decoder is newly initialized and the backbone uses
+the general MedicalNet pretrained weights, not the earlier T2 model.
+The existing baseline remains the default and its checkpoints are still
+supported.
+
+Run the new experiment on the same split, with a new directory:
+
+```bash
+"$HOME/Documents/BMEN600-G4-/venv/bin/python" "$HOME/Documents/BMEN600-G4-/scripts/t2_patches.py" --run-dir "$HOME/Documents/BMEN600-G4-/fusion-runs/t2-refined-01" --refined --epochs 30 --patches-per-case 3 --val-interval 5 --seed 1
+```
+
+Best-checkpoint selection uses mean validation Dice at a fixed 0.5 threshold.
+Evaluate that checkpoint with:
+
+```bash
+"$HOME/Documents/BMEN600-G4-/venv/bin/python" "$HOME/Documents/BMEN600-G4-/scripts/t2_patches.py" --run-dir "$HOME/Documents/BMEN600-G4-/fusion-runs/t2-refined-01" --evaluate val
+```
+
+For exploratory validation-only threshold comparisons, add e.g.
+`--threshold 0.7`. The output directory records the threshold; threshold
+changes can help some cases and hurt others. Never choose a threshold using
+test cases, and freeze model and threshold choices before external testing.
+The small validation cohort has already informed development, so its score
+is exploratory; use an independent untouched cohort for final assessment.
+Repeat with different `--seed` values and new run directories to assess
+training variability. This does not replace patient-level cross-validation
+or an untouched external evaluation.
+The refined run is CPU-only, may take longer and need more memory than the
+baseline, and does not currently resume interrupted training. The changes
+are experimental, not a guarantee of higher Dice.
+
 ## Late fusion of four native modalities
 
 This experimental workflow trains four **separate** single-channel 3D models:
